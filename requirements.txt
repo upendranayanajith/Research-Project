@@ -1,0 +1,16 @@
+# --- AI & Computer Vision ---
+ultralytics
+torch
+torchvision
+opencv-python
+numpy
+pillow
+
+# --- Backend API ---
+fastapi
+uvicorn
+python-multipart
+
+# --- Frontend Dashboard ---
+streamlit
+requests

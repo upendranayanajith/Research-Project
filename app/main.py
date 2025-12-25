@@ -1,72 +1,123 @@
+from fastapi import FastAPI, UploadFile, File
+from fastapi.responses import JSONResponse
+import uvicorn
 import cv2
-import argparse
+import numpy as np
+import torch
+import torch.nn as nn
+from torchvision import transforms, models
+from ultralytics import YOLO
+from PIL import Image
 import os
-from src.c1_localization import ClockLocalizer
+import io
 
-# --- CONFIG ---
-MODEL_PATH = "models/c1_localization/best.pt"
-OUTPUT_DIR = "output_results"
-# --------------
+# Import our core modules
+from app.core.utils import calculate_angle, get_aligned_crop
+from app.core.c4_inference import TimeInferenceEngine
 
-def main(source_type, source_path):
-    # 1. Setup
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    c1 = ClockLocalizer(MODEL_PATH, use_enhancer=True)
+app = FastAPI(title="Clock Reader Research API")
+
+# --- PATH CONFIGURATION ---
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+C2_MODEL_PATH = os.path.join(BASE_DIR, "models", "c2_hands_skeleton", "best.pt")
+C3_MODEL_PATH = os.path.join(BASE_DIR, "models", "c3_angle_regression", "best.pth")
+
+# --- MODEL LOADING ---
+print("🚀 Loading Models...")
+
+# 1. Load C2 (YOLO)
+c2_model = YOLO(C2_MODEL_PATH)
+
+# 2. Load C3 (ResNet Regression)
+# We must redefine the architecture to load weights
+def get_c3_model():
+    model = models.resnet18(pretrained=False)
+    num_ftrs = model.fc.in_features
+    model.fc = nn.Linear(num_ftrs, 1)
+    model = nn.Sequential(model, nn.Sigmoid())
+    return model
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+c3_model = get_c3_model().to(device)
+
+if os.path.exists(C3_MODEL_PATH):
+    c3_model.load_state_dict(torch.load(C3_MODEL_PATH, map_location=device))
+    c3_model.eval()
+    print("✅ C3 Model Loaded")
+else:
+    print("⚠️ WARNING: C3 Model not found at path!")
+
+# 3. Load C4 (Reasoning Engine)
+c4_engine = TimeInferenceEngine()
+
+# C3 Preprocessing Transforms
+c3_transform = transforms.Compose([
+    transforms.Resize((64, 64)),
+    transforms.ToTensor(),
+    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+])
+
+def dist(p1, p2):
+    return np.sqrt((p1[0]-p2[0])**2 + (p1[1]-p2[1])**2)
+
+@app.post("/analyze")
+async def analyze_clock(file: UploadFile = File(...)):
+    # 1. READ IMAGE
+    contents = await file.read()
+    nparr = np.frombuffer(contents, np.uint8)
+    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     
-    # 2. Open Input Source
-    if source_type == "webcam":
-        cap = cv2.VideoCapture(0)
-        print("[System] Starting Live Webcam Mode...")
-    else:
-        print(f"[System] Processing Static Image: {source_path}")
-        image = cv2.imread(source_path)
-        if image is None:
-            print("Error: Could not load image.")
-            return
+    if img is None:
+        return JSONResponse(content={"error": "Invalid image"}, status_code=400)
 
-    while True:
-        # Get Frame
-        if source_type == "webcam":
-            ret, frame = cap.read()
-            if not ret: break
-        else:
-            frame = image.copy() # Use the static image
+    # 2. RUN C2 (Skeleton Detection)
+    results = c2_model(img, verbose=False)[0]
+    
+    if results.keypoints is None or len(results.keypoints.data) == 0:
+        return JSONResponse(content={"error": "No clock hands found by C2"}, status_code=400)
 
-        # --- RUN COMPONENT 1 ---
-        # This returns the Unblurred, Straightened, Cropped Clock
-        processed_clock = c1.process_input(frame)
+    kpts = results.keypoints.data[0].cpu().numpy()
+    
+    # Extract Center and Tips
+    points = [(kpts[i][0], kpts[i][1]) for i in range(3)]
+    
+    # Simple heuristic: Center is the point closest to image center
+    h_img, w_img = img.shape[:2]
+    img_center = (w_img/2, h_img/2)
+    dists_to_center = [dist(p, img_center) for p in points]
+    center_idx = np.argmin(dists_to_center)
+    center_pt = points[center_idx]
+    
+    tips = [points[i] for i in range(3) if i != center_idx]
+    if len(tips) < 2:
+        return JSONResponse(content={"error": "Could not identify two hands"}, status_code=400)
 
-        # --- DISPLAY / SAVE RESULTS ---
-        if processed_clock is not None:
-            # Visualization
-            cv2.imshow("1. Input Source", frame)
-            cv2.imshow("2. C1 Output (Straight & Clean)", processed_clock)
+    # 3. RUN C3 (Angle Regression) for both hands
+    raw_angles = []
+    
+    for tip in tips:
+        # A. Get Rough Angle (Geometry)
+        rough_angle = calculate_angle(center_pt, tip)
+        
+        # B. Get Normalized Crop
+        crop = get_aligned_crop(img, center_pt, rough_angle)
+        
+        # C. Refine with AI
+        crop_pil = Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
+        input_tensor = c3_transform(crop_pil).unsqueeze(0).to(device)
+        
+        with torch.no_grad():
+            prediction = c3_model(input_tensor).item() # 0.0 to 1.0
             
-            # If Static, Save and Exit (We don't need a loop)
-            if source_type == "image":
-                save_path = os.path.join(OUTPUT_DIR, "processed_clock.jpg")
-                cv2.imwrite(save_path, processed_clock)
-                print(f"✅ Output saved to: {save_path}")
-                print("Press any key to exit.")
-                cv2.waitKey(0)
-                break
-        else:
-            cv2.imshow("1. Input Source", frame)
+        c3_adjustment = prediction * 360
+        final_angle = (rough_angle + c3_adjustment) % 360
+        raw_angles.append(final_angle)
 
-        # Exit Logic for Webcam
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
-
-    if source_type == "webcam":
-        cap.release()
-    cv2.destroyAllWindows()
+    # 4. RUN C4 (Reasoning)
+    # We pass the two angles. C4 figures out which is which.
+    decision = c4_engine.analyze(raw_angles[0], raw_angles[1])
+    
+    return decision
 
 if __name__ == "__main__":
-    # Create a simple command line interface
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=["webcam", "image"], default="image", help="Choose input mode")
-    parser.add_argument("--path", type=str, default="data/samples/test_clock.jpg", help="Path to image file")
-    
-    args = parser.parse_args()
-    
-    main(args.mode, args.path)
+    uvicorn.run(app, host="0.0.0.0", port=8000)
