@@ -1,194 +1,87 @@
-import torch
-import torch.nn as nn
-from torchvision import transforms, models
 from ultralytics import YOLO
 import cv2
 import numpy as np
 import os
 import math
-from PIL import Image
+from c4_physics import ClockPhysicsEngine # Import our new solver
 
 # --- CONFIG ---
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
-
 C2_PATH = os.path.join(PROJECT_ROOT, "models", "c2_hands_skeleton", "best.pt")
-C3_PATH = os.path.join(PROJECT_ROOT, "models", "c3_angle_regression", "best.pth")
 INPUT_DIR = os.path.join(PROJECT_ROOT, "data", "straight_clocks_dataset")
-OUTPUT_DIR = os.path.join(PROJECT_ROOT, "output_results")
-
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # --------------
 
-# --- 1. DEFINE C3 MODEL ARCHITECTURE ---
-# (Must match the training script exactly)
-def get_c3_model():
-    model = models.resnet18(pretrained=False)
-    num_ftrs = model.fc.in_features
-    model.fc = nn.Linear(num_ftrs, 1)
-    model = nn.Sequential(model, nn.Sigmoid())
-    return model
+def calculate_angle(center, point):
+    """Returns angle from 12 o'clock (Up), Clockwise positive"""
+    dx = point[0] - center[0]
+    dy = point[1] - center[1]
+    # atan2(y, x) -> atan2(dx, -dy) swaps to 0=Up, CW rotation
+    angle = math.degrees(math.atan2(dx, -dy))
+    if angle < 0: angle += 360
+    return angle
 
-# --- 2. UTILITY FUNCTIONS ---
-def calculate_initial_angle(center, tip):
-    """ Returns angle of the hand from 12 o'clock (CW positive) """
-    cx, cy = center
-    tx, ty = tip
-    dx = tx - cx
-    dy = ty - cy 
-    # math.atan2(y, x). Adjusted for 12 o'clock origin
-    angle_rad = math.atan2(dx, -dy)
-    angle_deg = math.degrees(angle_rad)
-    if angle_deg < 0: angle_deg += 360
-    return angle_deg
-
-def get_aligned_crop(img, center, rough_angle, box_size=128):
-    """
-    Rotates the whole image by -rough_angle so the hand becomes vertical (0 deg).
-    Then crops the center.
-    """
-    h, w = img.shape[:2]
-    cx, cy = center
-    
-    # Rotate CCW by rough_angle to bring hand to 0
-    M = cv2.getRotationMatrix2D((cx, cy), rough_angle, 1.0)
-    rotated = cv2.warpAffine(img, M, (w, h), borderValue=(255,255,255))
-    
-    # Crop
-    half = box_size // 2
-    x1, y1 = int(cx - half), int(cy - half)
-    
-    # Padding
-    pad_w, pad_h = 0, 0
-    if x1 < 0: pad_w = -x1
-    if y1 < 0: pad_h = -y1
-    if x1+box_size > w: pad_w = max(pad_w, (x1+box_size)-w)
-    if y1+box_size > h: pad_h = max(pad_h, (y1+box_size)-h)
-    
-    if pad_w > 0 or pad_h > 0:
-        rotated = cv2.copyMakeBorder(rotated, pad_h, pad_h, pad_w, pad_w, cv2.BORDER_CONSTANT, value=(255,255,255))
-        x1 += pad_w
-        y1 += pad_h
-        
-    return rotated[y1:y1+box_size, x1:x1+box_size]
-
-def dist(p1, p2):
-    return math.sqrt((p1[0]-p2[0])**2 + (p1[1]-p2[1])**2)
-
-# --- 3. MAIN PIPELINE ---
 def main():
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    
-    # Load C2 (YOLO)
-    print(f"Loading C2: {C2_PATH}...")
+    print(f"Loading C2 Model: {C2_PATH}...")
     c2_model = YOLO(C2_PATH)
+    physics_engine = ClockPhysicsEngine()
     
-    # Load C3 (ResNet)
-    print(f"Loading C3: {C3_PATH}...")
-    c3_model = get_c3_model().to(DEVICE)
-    c3_model.load_state_dict(torch.load(C3_PATH, map_location=DEVICE))
-    c3_model.eval()
+    images = [f for f in os.listdir(INPUT_DIR) if f.endswith(('.jpg', '.png'))]
+    print("Controls:\n  [SPACE] Next Image\n  [Q] Quit")
     
-    # Transforms for C3
-    c3_transform = transforms.Compose([
-        transforms.Resize((64, 64)),
-        transforms.ToTensor(),
-        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-    ])
-
-    print("\nControls:\n  [SPACE] Next Clock\n  [Q] Quit")
-    
-    image_files = [f for f in os.listdir(INPUT_DIR) if f.endswith(('.jpg', '.png'))]
-    
-    for img_name in image_files:
+    for img_name in images:
         img_path = os.path.join(INPUT_DIR, img_name)
-        original_img = cv2.imread(img_path)
-        if original_img is None: continue
+        img = cv2.imread(img_path)
+        if img is None: continue
         
-        display_img = original_img.copy()
-        h_img, w_img = original_img.shape[:2]
-        img_center = (w_img/2, h_img/2)
-        
-        # --- A. RUN C2 (Pose) ---
-        results = c2_model(original_img, verbose=False)[0]
-        
+        # 1. Get Skeleton from C2
+        results = c2_model(img, verbose=False)[0]
         if results.keypoints is None or len(results.keypoints.data) == 0:
-            print(f"Skipping {img_name}: No clock hands found.")
             continue
             
         kpts = results.keypoints.data[0].cpu().numpy()
         
-        # --- B. PARSE HANDS ---
-        # (Same logic as generator: identify center, hour, minute)
-        points = [(kpts[i][0], kpts[i][1]) for i in range(3)]
-        dists_to_center = [dist(p, img_center) for p in points]
-        center_idx = np.argmin(dists_to_center)
-        center_pt = points[center_idx]
+        # Extract points (We DON'T care which is H or M yet)
+        p0 = (kpts[0][0], kpts[0][1]) # Center
+        p1 = (kpts[1][0], kpts[1][1]) # Tip A
+        p2 = (kpts[2][0], kpts[2][1]) # Tip B
         
-        other_indices = [i for i in range(3) if i != center_idx]
-        tip1, tip2 = points[other_indices[0]], points[other_indices[1]]
+        # 2. Identify Center (Geometric Median)
+        # In a triangle of points, center is usually the one with acute angles to others
+        # Simplified: We trust the model's "Point 0" is Center for now.
+        center = p0
         
-        if dist(center_pt, tip1) > dist(center_pt, tip2):
-            minute_pt, hour_pt = tip1, tip2
-        else:
-            minute_pt, hour_pt = tip2, tip1
-            
-        # --- C. PROCESS EACH HAND ---
-        times = {}
-        for hand_name, tip_pt in [("Hour", hour_pt), ("Minute", minute_pt)]:
-            # 1. Rough Angle from C2
-            rough_angle = calculate_initial_angle(center_pt, tip_pt)
-            
-            # 2. Crop Aligned (Hand is now roughly vertical at 0 deg)
-            crop = get_aligned_crop(original_img, center_pt, rough_angle)
-            
-            # 3. Refine with C3
-            # Convert to PIL for PyTorch
-            crop_pil = Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
-            input_tensor = c3_transform(crop_pil).unsqueeze(0).to(DEVICE)
-            
-            with torch.no_grad():
-                prediction = c3_model(input_tensor).item() # 0.0 to 1.0
-                
-            # Convert prediction to degrees (0-360)
-            c3_angle = prediction * 360
-            
-            # 4. Combine
-            # We rotated world by -rough_angle. 
-            # The hand is now at `c3_angle`.
-            # So Real Angle = rough_angle + c3_angle
-            # (But handle the 360 wrap around)
-            final_angle = (rough_angle + c3_angle) % 360
-            
-            times[hand_name] = final_angle
-            
-            # VISUALIZATION
-            cv2.line(display_img, (int(center_pt[0]), int(center_pt[1])), 
-                     (int(tip_pt[0]), int(tip_pt[1])), (0,255,0), 2)
-            
-        # --- D. CALCULATE TIME ---
-        h_angle = times["Hour"]
-        m_angle = times["Minute"]
+        # 3. Calculate Raw Angles
+        angle_A = calculate_angle(center, p1)
+        angle_B = calculate_angle(center, p2)
         
-        # Minutes: Simple (Angle / 6)
-        minutes = int(round(m_angle / 6))
-        if minutes == 60: minutes = 0
+        # 4. SOLVE PHYSICS
+        # We pass both angles. The solver decides which is H and which is M.
+        best_h, best_m, error = physics_engine.solve_time(angle_A, angle_B)
         
-        # Hours: (Angle / 30). Note: 0 deg = 12.
-        hours = int(h_angle / 30)
-        if hours == 0: hours = 12
+        time_str = f"{best_h}:{best_m:02d}"
         
-        time_str = f"{hours}:{minutes:02d}"
+        # --- VISUALIZATION ---
+        display_img = img.copy()
         
-        print(f"🕒 {img_name} -> Predicted: {time_str} (H:{h_angle:.1f}°, M:{m_angle:.1f}°)")
+        # Draw Center
+        cv2.circle(display_img, (int(center[0]), int(center[1])), 5, (0, 0, 255), -1)
         
-        # Draw Text
-        cv2.putText(display_img, time_str, (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 
-                    2, (0, 0, 255), 3)
+        # Draw Lines (Yellow)
+        cv2.line(display_img, (int(center[0]), int(center[1])), (int(p1[0]), int(p1[1])), (0, 255, 255), 2)
+        cv2.line(display_img, (int(center[0]), int(center[1])), (int(p2[0]), int(p2[1])), (0, 255, 255), 2)
         
-        cv2.imshow("Final Result", display_img)
-        key = cv2.waitKey(0)
-        if key == ord('q'):
+        # Overlay Text
+        text = f"{time_str} (Err: {error:.1f})"
+        color = (0, 255, 0) if error < 15 else (0, 0, 255) # Green if confident, Red if unsure
+        
+        cv2.putText(display_img, text, (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
+        cv2.putText(display_img, f"A:{angle_A:.0f} B:{angle_B:.0f}", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1)
+
+        print(f"🕒 {img_name} -> {time_str}")
+        
+        cv2.imshow("Physics Solver Result", display_img)
+        if cv2.waitKey(0) == ord('q'):
             break
 
     cv2.destroyAllWindows()
