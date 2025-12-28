@@ -3,7 +3,7 @@ import cv2
 import numpy as np
 import os
 import math
-from c4_physics import ClockPhysicsEngine # Import our new solver
+from scripts.c4_reasoning_engine import ClockPhysicsEngine # Import our new solver
 
 # --- CONFIG ---
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
