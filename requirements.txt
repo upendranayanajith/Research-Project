@@ -1,0 +1,19 @@
+# --- Core AI & Vision ---
+ultralytics
+torch
+torchvision
+opencv-python
+numpy
+pillow
+
+# --- Backend API ---
+fastapi
+uvicorn
+python-multipart
+
+# --- Frontend Dashboard ---
+streamlit
+requests
+
+# --- Explainable AI (Component 5) ---
+grad-cam
