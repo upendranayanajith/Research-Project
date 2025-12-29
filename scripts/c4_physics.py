@@ -30,7 +30,7 @@ class ClockPhysicsEngine:
         error_b = self.get_angle_diff(angle2, theory_h) + \
                   self.get_angle_diff(angle1, theory_m)
         
-        # 4. Find the global minimum error
+        # 4. Find the global minimum error.
         min_error_a = np.min(error_a)
         min_error_b = np.min(error_b)
         
