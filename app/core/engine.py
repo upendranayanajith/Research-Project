@@ -89,50 +89,31 @@ class ClockEngine:
         return rotated[int(center[1]-s):int(center[1]+s), int(center[0]-s):int(center[0]+s)]
 
     def _localize_clock(self, img):
-        """
-        C1: Finds the clock in a wild image and crops it.
-        """
         if self.c1_model is None:
-            return img, False  # Fallback: Use full image
-            
-        # Run C1 Detection
+            return img, False
         results = self.c1_model(img, verbose=False)[0]
-        
         if len(results.boxes) == 0:
-            return img, False # No clock found
-            
-        # Get the box with highest confidence
+            return img, False 
         best_box = results.boxes[0]
         x1, y1, x2, y2 = map(int, best_box.xyxy[0])
-        conf = float(best_box.conf[0])
-        
-        # Crop with some padding
         h, w = img.shape[:2]
         pad = 20
-        x1 = max(0, x1 - pad)
-        y1 = max(0, y1 - pad)
-        x2 = min(w, x2 + pad)
-        y2 = min(h, y2 + pad)
-        
-        crop = img[y1:y2, x1:x2]
-        return crop, True
+        x1, y1 = max(0, x1 - pad), max(0, y1 - pad)
+        x2, y2 = min(w, x2 + pad), min(h, y2 + pad)
+        return img[y1:y2, x1:x2], True
 
     def analyze(self, img_array, force_expert=False):
         debug_info = []
 
         # [STEP 1] C1: LOCALIZATION
-        # Scan the wild image to find the clock
         clock_crop, found_clock = self._localize_clock(img_array)
-        
         if found_clock:
             debug_info.append("C1: Clock Detected & Cropped")
         else:
             debug_info.append("C1: No clock detected (Scanning full image)")
 
         # [STEP 2] C2: POSE ESTIMATION
-        # Run C2 on the CROP, not the full room
         results = self.c2_model(clock_crop, verbose=False)[0]
-        
         if not results.keypoints or len(results.keypoints.data) == 0:
             return {"error": "C2 Failed: No hands found on clock surface"}
         
@@ -170,10 +151,15 @@ class ClockEngine:
                     continue
                 
                 pil_crop = Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
+                
+                # --- FIX: Ensure resizing matches C3 expectation (64x64) ---
+                pil_crop_resized = pil_crop.resize((64, 64)) 
+                
                 t_input = self.c3_transform(pil_crop).unsqueeze(0).to(self.device)
                 
                 if heatmap_img is None:
-                    norm_crop = np.array(pil_crop, dtype=np.float32) / 255.0
+                    # Pass the RESIZED image to the heatmap generator
+                    norm_crop = np.array(pil_crop_resized, dtype=np.float32) / 255.0
                     heatmap_img = self.xai.generate(t_input, norm_crop)
 
                 with torch.no_grad():
