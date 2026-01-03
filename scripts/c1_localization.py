@@ -8,6 +8,11 @@ class ClockLocalizer:
         self.model = YOLO(model_path)
         self.use_enhancer = use_enhancer
 
+        if self.use_enhancer:
+            print("[C1] Loading Real-ESRGAN Enhancer...")
+            pass
+
+
     def process_input(self, image):
         """
         Accepts ANY image (Video Frame or Static File).
@@ -31,3 +36,11 @@ class ClockLocalizer:
 
         M, _ = cv2.findHomography(src_pts, dst_pts)
         warped_img = cv2.warpPerspective(image, M, (400, 400))
+
+        final_clock = warped_img
+
+        if self.use_enhancer:
+            print("[C1] Enhancement stage enabled (placeholder)")
+            # Real-ESRGAN integration will be added later
+
+        return final_clock
