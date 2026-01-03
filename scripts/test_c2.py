@@ -18,32 +18,53 @@ def calculate_distance(p1, p2):
     return math.sqrt((p2[0] - p1[0])**2 + (p2[1] - p1[1])**2)
 
 def mark_hands_optimized():
+    print(f"📂 Project Root: {BASE_DIR}")
+    print(f"📂 Looking for model at: {MODEL_PATH}")
     print(f"📂 Looking for images in: {TEST_IMAGE_DIR}")
     
-    # 1. Load Model
+    # 1. Check if model exists
     if not os.path.exists(MODEL_PATH):
-        print(f"❌ Error: Model not found at {MODEL_PATH}")
+        print(f"\n❌ ERROR: Model not found at {MODEL_PATH}")
         return
+    
+    # 2. Check if image directory exists
+    if not os.path.exists(TEST_IMAGE_DIR):
+        print(f"\n❌ ERROR: Image folder not found at {TEST_IMAGE_DIR}")
+        print("   Please create the folder and add test images.")
+        return
+    
+    # 3. Load Model
+    print("🚀 Loading YOLO model...")
     model = YOLO(MODEL_PATH)
+    print("✅ Model loaded successfully.")
 
-    # 2. Find Images (Supports multiple formats)
+    # 4. Find Images (Supports multiple formats)
     valid_extensions = ('.jpg', '.jpeg', '.png', '.bmp', '.webp')
+    all_files = os.listdir(TEST_IMAGE_DIR)
+    print(f"📁 Files in directory: {all_files}")
+    
     images = [
         os.path.join(TEST_IMAGE_DIR, f) 
-        for f in os.listdir(TEST_IMAGE_DIR) 
+        for f in all_files 
         if f.lower().endswith(valid_extensions)
     ]
 
+    print(f"🧐 Found {len(images)} images to test.")
+    
     if not images:
-        print("❌ No images found. Please check your 'testing_samples' folder.")
+        print("❌ No images found. Please add .jpg, .jpeg, .png, or .bmp images to the testing_samples folder.")
+        print(f"   Folder location: {TEST_IMAGE_DIR}")
         return
 
-    print("✅ Press 'SPACE' for next image, 'q' to quit.")
+    print("\n✅ Press 'SPACE' for next image, 'q' to quit.\n")
 
-    # 3. Process Images
+    # 5. Process Images
     for img_path in images:
+        print(f"Processing: {os.path.basename(img_path)}")
         img = cv2.imread(img_path)
-        if img is None: continue
+        if img is None:
+            print(f"  ⚠️ Could not read: {img_path}")
+            continue
 
         # Run AI Inference
         results = model(img)[0]
@@ -84,14 +105,20 @@ def mark_hands_optimized():
             # Draw Minute Hand (RED = Long)
             cv2.line(img, center, minute_tip, (0, 0, 255), 2) # Thickness 2
             cv2.putText(img, "M", minute_tip, cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+            
+            print(f"  ✅ Detected keypoints - Hour hand length: {len_a if len_a < len_b else len_b:.1f}px, Minute hand length: {max(len_a, len_b):.1f}px")
+        else:
+            print(f"  ⚠️ No keypoints detected in this image")
 
         # Show Result
         cv2.imshow("Optimized Hand Marking", img)
         key = cv2.waitKey(0)
         if key == ord('q'):
+            print("\nQuitting...")
             break
 
     cv2.destroyAllWindows()
+    print("\n✅ Processing complete!")
 
 if __name__ == "__main__":
     mark_hands_optimized()
