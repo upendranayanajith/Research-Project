@@ -4,7 +4,7 @@ from ultralytics import YOLO
 
 class ClockLocalizer:
     def __init__(self, model_path, use_enhancer=True):
-        pass
+        print(f"[C1] Loading Localization Model: {model_path}")
+        self.model = YOLO(model_path)
+        self.use_enhancer = use_enhancer
 
-    def process_input(self, image):
-        pass
