@@ -19,3 +19,15 @@ class ClockLocalizer:
             return None
 
         kpts = results.keypoints.xy[0].cpu().numpy()
+
+        src_pts = kpts[[1, 2, 3, 4]].astype(np.float32)
+
+        dst_pts = np.array([
+            [200, 50],
+            [350, 200],
+            [200, 350],
+            [50, 200]
+        ], dtype=np.float32)
+
+        M, _ = cv2.findHomography(src_pts, dst_pts)
+        warped_img = cv2.warpPerspective(image, M, (400, 400))
