@@ -1,18 +1,50 @@
-# Ignore Virtual Environment
-venv/
-.env
+# Python
 __pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
 
-# Ignore Datasets (Too large for Git)
-data/
-datasets/
-*.zip
+# PyTorch
+*.pth
+*.pt
+!models/**/*.pt
+!models/**/*.pth
 
-# Ignore Model Weights (Too large for Git - Share these via Drive)
-models/**/*.pt
-models/**/*.pth
-runs/
+# Jupyter Notebook
+.ipynb_checkpoints
 
-# Ignore IDE settings
+# IDEs
 .vscode/
 .idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Environment variables
+.env
