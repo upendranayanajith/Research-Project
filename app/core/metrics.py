@@ -1,156 +1,167 @@
-import time
-from datetime import datetime
-from typing import List, Dict
-import threading
+import sqlite3
 import json
+import threading
+from datetime import datetime
+from typing import Dict, List, Optional
+import pandas as pd
 
 class MetricsTracker:
-    """
-    Singleton class to track performance metrics across all analyses
-    """
     _instance = None
     _lock = threading.Lock()
-    
+
     def __new__(cls):
         if cls._instance is None:
             with cls._lock:
                 if cls._instance is None:
                     cls._instance = super().__new__(cls)
-                    cls._instance._initialized = False
+                    # We do NOT init DB here anymore to avoid the AttributeError
+                    cls._instance._initialized = False 
         return cls._instance
-    
+
     def __init__(self):
-        if self._initialized:
+        # Prevent re-initialization if the object already exists
+        if getattr(self, "_initialized", False):
             return
-        
+            
+        self.db_path = "analytics.db"
+        self._init_db()
         self._initialized = True
-        self.analyses = []
-        self.start_time = datetime.now()
-    
+
+    def _init_db(self):
+        """Initialize the SQLite database and table"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS analytics (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        timestamp TEXT,
+                        image_name TEXT,
+                        processing_time REAL,
+                        method TEXT,
+                        success INTEGER,
+                        confidence TEXT,
+                        components_used TEXT,
+                        error_msg TEXT
+                    )
+                """)
+        except Exception as e:
+            print(f"⚠️ Warning: Database initialization failed: {e}")
+
     def record_analysis(self, result: Dict, processing_time: float, image_name: str = ""):
-        """
-        Record a single analysis result
-        
-        Args:
-            result: Analysis result dict from engine
-            processing_time: Time taken in seconds
-            image_name: Optional name of analyzed image
-        """
-        analysis_record = {
-            "timestamp": datetime.now().isoformat(),
-            "image_name": image_name,
-            "processing_time": processing_time,
-            "success": "error" not in result,
-            "method": result.get("method", "Unknown"),
-            "confidence": result.get("confidence", "Unknown"),
-            "time_detected": result.get("time", "N/A"),
-            "error": result.get("error", None),
-            "components_used": self._extract_components(result.get("method", "")),
-            "angles": result.get("angles", {})
-        }
-        
-        self.analyses.append(analysis_record)
-    
-    def _extract_components(self, method: str) -> List[str]:
-        """Extract which components were used from method string"""
-        components = []
-        if "C1" in method:
-            components.append("C1")
-        if "C2" in method:
-            components.append("C2")
-        if "C3" in method:
-            components.append("C3")
-        if "C4" in method:
-            components.append("C4")
-        return components
-    
+        """Insert a new record into the database"""
+        try:
+            timestamp = datetime.now().isoformat()
+            method = result.get("method", "Unknown")
+            success = 1 if "error" not in result else 0
+            confidence = str(result.get("confidence", "Unknown"))
+            error_msg = str(result.get("error", ""))
+            
+            # Extract components for storage
+            comps = []
+            if "C1" in method: comps.append("C1")
+            if "C2" in method: comps.append("C2")
+            if "C3" in method: comps.append("C3")
+            if "C4" in method: comps.append("C4")
+            components_json = json.dumps(comps)
+
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute("""
+                    INSERT INTO analytics 
+                    (timestamp, image_name, processing_time, method, success, confidence, components_used, error_msg)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (timestamp, image_name, processing_time, method, success, confidence, components_json, error_msg))
+        except Exception as e:
+            print(f"⚠️ Failed to record metric: {e}")
+
     def get_metrics(self) -> Dict:
-        """
-        Calculate and return aggregated metrics
-        """
-        if not self.analyses:
+        """Calculate aggregate metrics directly from SQL"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+
+                # Basic Counts
+                total = cursor.execute("SELECT COUNT(*) FROM analytics").fetchone()[0]
+                success = cursor.execute("SELECT COUNT(*) FROM analytics WHERE success=1").fetchone()[0]
+                failed = total - success
+                
+                # Averages
+                avg_time_row = cursor.execute("SELECT AVG(processing_time) FROM analytics").fetchone()
+                avg_time = avg_time_row[0] if avg_time_row[0] is not None else 0.0
+
+                # Method Usage
+                methods = cursor.execute("SELECT method, COUNT(*) FROM analytics GROUP BY method").fetchall()
+                method_usage = {row[0]: row[1] for row in methods}
+
+                # Component Usage
+                all_comps = cursor.execute("SELECT components_used FROM analytics").fetchall()
+                comp_usage = {"C1": 0, "C2": 0, "C3": 0, "C4": 0}
+                for row in all_comps:
+                    try:
+                        c_list = json.loads(row[0])
+                        for c in c_list:
+                            if c in comp_usage: comp_usage[c] += 1
+                    except:
+                        pass
+
+                return {
+                    "total_analyses": total,
+                    "success_count": success,
+                    "failure_count": failed,
+                    "success_rate": (success / total * 100) if total > 0 else 0,
+                    "avg_processing_time": avg_time,
+                    "method_usage": method_usage,
+                    "component_usage": comp_usage,
+                    "uptime": 0
+                }
+        except Exception as e:
+            print(f"Error fetching metrics: {e}")
             return {
-                "total_analyses": 0,
-                "success_rate": 0,
-                "avg_processing_time": 0,
-"component_usage": {},
-                "confidence_distribution": {},
-                "recent_analyses": []
+                "total_analyses": 0, "success_count": 0, "failure_count": 0,
+                "success_rate": 0, "avg_processing_time": 0,
+                "method_usage": {}, "component_usage": {}
             }
-        
-        total = len(self.analyses)
-        successful = sum(1 for a in self.analyses if a["success"])
-        
-        # Calculate averages
-        processing_times = [a["processing_time"] for a in self.analyses]
-        avg_time = sum(processing_times) / len(processing_times) if processing_times else 0
-        
-        # Component usage count
-        component_usage = {"C1": 0, "C2": 0, "C3": 0, "C4": 0}
-        for analysis in self.analyses:
-            for comp in analysis["components_used"]:
-                if comp in component_usage:
-                    component_usage[comp] += 1
-        
-        # Confidence distribution
-        confidence_dist = {}
-        for analysis in self.analyses:
-            conf = analysis["confidence"]
-            confidence_dist[conf] = confidence_dist.get(conf, 0) + 1
-        
-        # Method usage
-        method_usage = {}
-        for analysis in self.analyses:
-            method = analysis["method"]
-            method_usage[method] = method_usage.get(method, 0) + 1
-        
-        # Processing time breakdown
-        time_breakdown = {
-            "min": min(processing_times) if processing_times else 0,
-            "max": max(processing_times) if processing_times else 0,
-            "avg": avg_time,
-            "all_times": processing_times[-20:]  # Last 20 analyses
-        }
-        
-        return {
-            "total_analyses": total,
-            "success_count": successful,
-            "failure_count": total - successful,
-            "success_rate": (successful / total * 100) if total > 0 else 0,
-            "avg_processing_time": avg_time,
-            "time_breakdown": time_breakdown,
-            "component_usage": component_usage,
-            "confidence_distribution": confidence_dist,
-            "method_usage": method_usage,
-            "recent_analyses": self.analyses[-10:],  # Last 10
-            "uptime": (datetime.now() - self.start_time).total_seconds() / 3600  # hours
-        }
-    
+
+    def get_history(self, limit=100) -> List[Dict]:
+        """Fetch raw rows for the dashboard table"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.execute("SELECT * FROM analytics ORDER BY id DESC LIMIT ?", (limit,))
+                return [dict(row) for row in cursor.fetchall()]
+        except:
+            return []
+
+    def clear_metrics(self):
+        """Wipe the database"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute("DELETE FROM analytics")
+        except:
+            pass
+
     def export_to_csv(self) -> str:
-        """Export analyses to CSV format"""
-        if not self.analyses:
-            return "No data available"
-        
+        """Export DB to CSV string"""
         import io
         import csv
         
         output = io.StringIO()
-        fieldnames = ["timestamp", "image_name", "processing_time", "success", 
-                     "method", "confidence", "time_detected", "error"]
-        
-        writer = csv.DictWriter(output, fieldnames=fieldnames)
-        writer.writeheader()
-        
-        for analysis in self.analyses:
-            row = {k: analysis.get(k, "") for k in fieldnames}
-            writer.writerow(row)
-        
-        return output.getvalue()
-    
-    def clear_metrics(self):
-        """Reset all metrics"""
-        self.analyses = []
-        self.start_time = datetime.now()
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.execute("SELECT * FROM analytics")
+                rows = cursor.fetchall()
+                
+                if not rows:
+                    return "No Data"
 
-# Global instance
+                # Get headers
+                headers = [description[0] for description in cursor.description]
+                writer = csv.writer(output)
+                writer.writerow(headers)
+                writer.writerows(rows)
+        except Exception as e:
+            return f"Error exporting CSV: {e}"
+            
+        return output.getvalue()
+
 metrics_tracker = MetricsTracker()

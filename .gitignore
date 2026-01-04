@@ -1,51 +1,25 @@
-# Python
+# Python junk
 __pycache__/
 *.py[cod]
 *$py.class
-*.so
-.Python
-env/
+
+# Virtual Environment
+.venv/
 venv/
-ENV/
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
+env/
+
+# Database (Do NOT share this!)
+*.db
+analytics.db
 data/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
 
-# PyTorch
-*.pth
-*.pt
-!models/**/*.pt
-!models/**/*.pth
+# Large Model Files (They live on Google Drive, not GitHub)
+models/**/*.pt
+models/**/*.pth
+models/c1_localization/*.pt
+models/c2_hands_skeleton/*.pt
+models/c3_angle_regression/*.pth
 
-# Jupyter Notebook
-.ipynb_checkpoints
-
-# IDEs
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# OS
+# OS junk
 .DS_Store
 Thumbs.db
-
-# Logs
-*.log
-
-# Environment variables
-.env
