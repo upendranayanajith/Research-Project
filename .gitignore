@@ -1,6 +1,3 @@
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
 # Python
 __pycache__/
 *.py[cod]
@@ -21,11 +18,11 @@ lib64/
 parts/
 sdist/
 var/
+data/
 wheels/
 *.egg-info/
 .installed.cfg
 *.egg
-data/
 
 # PyTorch
 *.pth
@@ -52,35 +49,3 @@ Thumbs.db
 
 # Environment variables
 .env
-=======
-=======
->>>>>>> Stashed changes
-=======
->>>>>>> Stashed changes
-# Ignore Virtual Environment
-venv/
-.env
-__pycache__/
-
-# Ignore Datasets (Too large for Git)
-data/
-datasets/
-*.zip
-
-# Ignore Model Weights (Too large for Git - Share these via Drive)
-models/**/*.pt
-models/**/*.pth
-runs/
-
-# Ignore IDE settings
-.vscode/
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
-.idea/
->>>>>>> Stashed changes
-=======
-.idea/
->>>>>>> Stashed changes
-=======
-.idea/
->>>>>>> Stashed changes
