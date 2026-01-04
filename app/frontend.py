@@ -12,8 +12,9 @@ API_URL = "http://localhost:8000"
 st.set_page_config(page_title="Clock AI Research", layout="wide", page_icon="🕰️")
 
 # ===== SIDEBAR NAVIGATION =====
-st.sidebar.title("🕰️ Clock AI Research")
-st.sidebar.markdown("### Navigation")
+st.sidebar.markdown("### Multi-Model Ensemble Architecture")
+st.sidebar.markdown("#### for Analog Clock Reading")
+st.sidebar.markdown("---")
 
 page = st.sidebar.radio(
     "Select Page",
@@ -56,7 +57,7 @@ if page == "📊 Analysis":
                         viz = data.get("visualizations", {})
                         
                         if "error" in res:
-                            st.error(f"Analysis Failed: {res['error']}")
+                            st.error(f"✗ Analysis Failed: {res['error']}")
                         else:
                             # Success Banner
                             st.success(f"✅ Analysis Complete in {data['processing_time']:.3f}s")

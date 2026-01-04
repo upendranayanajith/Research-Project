@@ -23,3 +23,13 @@ models/c3_angle_regression/*.pth
 # OS junk
 .DS_Store
 Thumbs.db
+
+# Logs
+*.log
+
+# Environment variables
+.env
+
+# Database
+analytics.db
+Thumbs.db
