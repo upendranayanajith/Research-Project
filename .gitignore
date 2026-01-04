@@ -1,4 +1,5 @@
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
 # Python
 __pycache__/
 *.py[cod]
@@ -51,6 +52,8 @@ Thumbs.db
 # Environment variables
 .env
 =======
+=======
+>>>>>>> Stashed changes
 # Ignore Virtual Environment
 venv/
 .env
@@ -68,5 +71,9 @@ runs/
 
 # Ignore IDE settings
 .vscode/
+<<<<<<< Updated upstream
+.idea/
+>>>>>>> Stashed changes
+=======
 .idea/
 >>>>>>> Stashed changes
