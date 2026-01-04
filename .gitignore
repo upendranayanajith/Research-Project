@@ -49,3 +49,6 @@ Thumbs.db
 
 # Environment variables
 .env
+
+# Database
+analytics.db

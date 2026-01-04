@@ -13,25 +13,83 @@ import numpy as np
 
 API_URL = "http://localhost:8000"
 
-st.set_page_config(page_title="Clock AI Research - Advanced Demo", layout="wide")
+st.set_page_config(
+    page_title="Multi-Model Ensemble Architecture for Analog Clock Reading", 
+    page_icon="⏱",
+    layout="wide"
+)
+
+# ===== CUSTOM CSS STYLING =====
+st.markdown("""
+<style>
+    /* Navigation Icons */
+    .sidebar-nav-icon { 
+        color: #4A90E2; 
+        margin-right: 8px; 
+    }
+    
+    /* Stage Indicators */
+    .stage-active { 
+        color: #28A745; 
+        font-weight: bold; 
+    }
+    
+    .stage-inactive { 
+        color: #CCCCCC; 
+    }
+    
+    /* Status Icons */
+    .status-success { 
+        color: #28A745; 
+    }
+    
+    .status-error { 
+        color: #DC3545; 
+    }
+    
+    .status-warning { 
+        color: #FFC107; 
+    }
+    
+    /* Professional Headers */
+    .main-title { 
+        font-size: 2.2em; 
+        font-weight: 600; 
+        margin-bottom: 0.3em; 
+    }
+    
+    .subtitle { 
+        font-size: 1.2em; 
+        color: #666; 
+        margin-bottom: 1.5em; 
+    }
+    
+    /* Clean Dividers */
+    .divider-professional {
+        border-top: 2px solid #E0E0E0;
+        margin: 1.5em 0;
+    }
+</style>
+""", unsafe_allow_html=True)
 
 # ===== SIDEBAR NAVIGATION =====
-st.sidebar.title("🕰️ Clock AI Research")
-st.sidebar.markdown("### Navigation")
+st.sidebar.markdown("### Multi-Model Ensemble Architecture")
+st.sidebar.markdown("#### for Analog Clock Reading")
+st.sidebar.markdown("---")
 
 page = st.sidebar.radio(
-    "Select Page",
-    ["📊 Analysis", "📦 Batch Processing", "📹 Live Webcam", "📈 Performance Dashboard"],
-    label_visibility="collapsed"
+    "Navigation",
+    ["▸ Single Image Analysis", "▸ Batch Processing", "▸ Live Webcam", "▸ Performance Dashboard"],
+    label_visibility="visible"
 )
 
 st.sidebar.markdown("---")
-st.sidebar.markdown("**Year 4 Research Project**\nComponents C1-C5")
+st.sidebar.markdown("**Research Project**  \nComponents C1-C5")
 
-# ===== PAGE 1: ANALYSIS (Original) =====
-if page == "📊 Analysis":
-    st.title("🕰️ Multi-Stage Clock Reasoning System")
-    st.markdown("### Single Image Analysis - Component Visualization")
+# ===== PAGE 1: SINGLE IMAGE ANALYSIS =====
+if page == "▸ Single Image Analysis":
+    st.markdown('<div class="main-title">Multi-Model Ensemble Architecture for Analog Clock Reading</div>', unsafe_allow_html=True)
+    st.markdown('<div class="subtitle">Single Image Analysis - Component Visualization</div>', unsafe_allow_html=True)
     
     force_expert = st.checkbox("Force Expert Path (Activate C3 + XAI)", value=False)
     uploaded_file = st.file_uploader("Upload Clock Image", type=["jpg", "png", "jpeg"])
@@ -55,10 +113,10 @@ if page == "📊 Analysis":
                         proc_time = data.get("processing_time", 0)
                         
                         if "error" in res:
-                            st.error(f"Analysis Failed: {res['error']}")
+                            st.error(f"✗ Analysis Failed: {res['error']}")
                         else:
                             # Show processing time
-                            st.success(f"✅ Analysis Complete! Processing Time: **{proc_time:.2f}s**")
+                            st.success(f"✓ Analysis Complete! Processing Time: **{proc_time:.2f}s**")
                             
                             # Pipeline Stage Indicator
                             st.markdown("---")
@@ -73,35 +131,36 @@ if page == "📊 Analysis":
                             cols_indicator = st.columns(4)
                             for idx, (col, stage) in enumerate(zip(cols_indicator, stages)):
                                 component = stage.split()[0]
+                                stage_num = ["①", "②", "③", "④"][idx]
                                 if component in active_stages:
-                                    col.markdown(f"### ✅ {stage}")
+                                    col.markdown(f'<div class="stage-active">{stage_num} {stage}</div>', unsafe_allow_html=True)
                                 else:
-                                    col.markdown(f"### ⚪ {stage}")
+                                    col.markdown(f'<div class="stage-inactive">○ {stage}</div>', unsafe_allow_html=True)
                             
                             st.markdown("---")
                             
                             # Stage Visualizations Tabs
-                            st.subheader("📊 Pipeline Stage Visualizations")
+                            st.subheader("Pipeline Stage Visualizations")
                             
                             tab1, tab2, tab3, tab4 = st.tabs([
-                                "🔍 Stage 1: C1 Localization",
-                                "✋ Stage 2: C2 Hand Detection", 
-                                "🎯 Stage 3: C3 Refinement",
-                                "🧮 Stage 4: Final Result"
+                                "Stage 1: C1 Localization",
+                                "Stage 2: C2 Hand Detection", 
+                                "Stage 3: C3 Refinement",
+                                "Stage 4: Final Result"
                             ])
                             
                             with tab1:
                                 st.markdown("**Component C1: Clock Localization (YOLO)**")
                                 if "c1_detection" in viz:
                                     c1_img = base64.b64decode(viz["c1_detection"])
-                                    st.image(c1_img, caption="Yellow box: Detected clock region", use_container_width=True)
+                                    st.image(c1_img, caption="Yellow box: Detected clock region", width=700)
                                     st.info("✓ Clock successfully localized in the image")
                             
                             with tab2:
                                 st.markdown("**Component C2: Hand Skeleton Detection (YOLO Pose)**")
                                 if "c2_hands" in viz:
                                     c2_img = base64.b64decode(viz["c2_hands"])
-                                    st.image(c2_img, caption="Blue=Center, Green=Hand 1, Red=Hand 2", use_container_width=True)
+                                    st.image(c2_img, caption="Blue=Center, Green=Hand 1, Red=Hand 2", width=700)
                                     
                                     if "angles" in res:
                                         col1, col2 = st.columns(2)
@@ -117,23 +176,23 @@ if page == "📊 Analysis":
                                     cols = st.columns(len(viz["c3_crops"]))
                                     for idx, (col, crop_b64) in enumerate(zip(cols, viz["c3_crops"])):
                                         crop_img = base64.b64decode(crop_b64)
-                                        col.image(crop_img, caption=f"Hand {idx+1} Crop", use_container_width=True)
+                                        col.image(crop_img, caption=f"Hand {idx+1} Crop", width=200)
                                     
                                     if data.get("heatmap_b64"):
                                         st.markdown("**Component C5: XAI Visual Explanation (Grad-CAM)**")
                                         heatmap_bytes = base64.b64decode(data["heatmap_b64"])
-                                        st.image(heatmap_bytes, caption="Attention Map", use_container_width=True)
+                                        st.image(heatmap_bytes, caption="Attention Map", width=600)
                                     
                                     st.success("✓ Angles refined using deep learning")
                                 else:
                                     if force_expert:
-                                        st.warning("C3 refinement attempted but no crops available")
+                                        st.warning("⚠ C3 refinement attempted but no crops available")
                                     else:
                                         st.info("Fast Path used - C3 refinement skipped")
                             
                             with tab4:
                                 st.markdown("**Component C4: Physics-Based Reasoning**")
-                                st.markdown(f"## 🕐 Predicted Time: **{res['time']}**")
+                                st.markdown(f"## Predicted Time: **{res['time']}**")
                                 
                                 col1, col2 = st.columns(2)
                                 with col1:
@@ -145,22 +204,22 @@ if page == "📊 Analysis":
                                         st.info(f"**Reasoning:** {res['reasoning']}")
                                 
                                 if "debug" in res and res["debug"]:
-                                    with st.expander("🔧 Debug Information"):
+                                    with st.expander("Debug Information"):
                                         for info in res["debug"]:
                                             st.text(info)
                                 
                                 st.success("✓ Final time calculated using physics constraints")
                     else:
-                        st.error(f"Backend Error: {response.status_code}")
+                        st.error(f"✗ Backend Error: {response.status_code}")
                 except Exception as e:
-                    st.error(f"Connection Failed: {e}")
+                    st.error(f"✗ Connection Failed: {e}")
     else:
-        st.info("👈 Upload a clock image to analyze")
+        st.info("Upload a clock image to begin analysis")
 
 # ===== PAGE 2: BATCH PROCESSING =====
-elif page == "📦 Batch Processing":
-    st.title("📦 Batch Image Processing")
-    st.markdown("### Process Multiple Clock Images Simultaneously")
+elif page == "▸ Batch Processing":
+    st.markdown('<div class="main-title">Batch Image Processing</div>', unsafe_allow_html=True)
+    st.markdown('<div class="subtitle">Process Multiple Clock Images Simultaneously</div>', unsafe_allow_html=True)
     
     force_expert_batch = st.checkbox("Force Expert Path for all images", value=False, key="batch_expert")
     uploaded_files = st.file_uploader("Upload Multiple Clock Images", 
@@ -168,7 +227,7 @@ elif page == "📦 Batch Processing":
                                       accept_multiple_files=True)
     
     if uploaded_files:
-        st.info(f"📁 {len(uploaded_files)} images selected")
+        st.info(f"Files Selected: {len(uploaded_files)}")
         
         if st.button("Process Batch", type="primary"):
             progress_bar = st.progress(0)
@@ -192,7 +251,7 @@ elif page == "📦 Batch Processing":
                         batch_data = response.json()
                         results_list = batch_data["results"]
                         
-                        st.success(f"✅ Batch Processing Complete! Total: {batch_data['total_images']} images")
+                        st.success(f"✓ Batch Processing Complete! Total: {batch_data['total_images']} images")
                         
                         # Summary metrics
                         col1, col2, col3, col4 = st.columns(4)
@@ -206,18 +265,18 @@ elif page == "📦 Batch Processing":
                         col4.metric("Avg Time", f"{avg_time:.2f}s")
                         
                         # Results Table
-                        st.subheader("📋 Detailed Results")
+                        st.subheader("Detailed Results")
                         df = pd.DataFrame(results_list)
                         st.dataframe(df, use_container_width=True)
                         
                         # Export Options
-                        st.subheader("💾 Export Results")
+                        st.subheader("Export Results")
                         col1, col2 = st.columns(2)
                         
                         with col1:
                             csv = df.to_csv(index=False)
                             st.download_button(
-                                label="📥 Download as CSV",
+                                label="⇓ Download CSV",
                                 data=csv,
                                 file_name="batch_results.csv",
                                 mime="text/csv"
@@ -226,14 +285,14 @@ elif page == "📦 Batch Processing":
                         with col2:
                             json_data = df.to_json(orient="records", indent=2)
                             st.download_button(
-                                label="📥 Download as JSON",
+                                label="⇓ Download JSON",
                                 data=json_data,
                                 file_name="batch_results.json",
                                 mime="application/json"
                             )
                         
                         # Visualizations
-                        st.subheader("📊 Batch Analysis Visualizations")
+                        st.subheader("Batch Analysis Visualizations")
                         
                         viz_col1, viz_col2 = st.columns(2)
                         
@@ -244,7 +303,7 @@ elif page == "📦 Batch Processing":
                                 values=[successful, failed],
                                 marker=dict(colors=["#00cc66", "#ff4444"])
                             )])
-                            fig_status.update_layout(title="Success Rate")
+                            fig_status.update_layout(title="Success Rate", height=350)
                             st.plotly_chart(fig_status, use_container_width=True)
                         
                         with viz_col2:
@@ -252,25 +311,26 @@ elif page == "📦 Batch Processing":
                             fig_time = px.bar(df, x="filename", y="processing_time",
                                             title="Processing Time per Image",
                                             labels={"processing_time": "Time (s)", "filename": "Image"})
+                            fig_time.update_layout(height=350)
                             st.plotly_chart(fig_time, use_container_width=True)
                         
                     else:
-                        st.error(f"Backend Error: {response.status_code}")
+                        st.error(f"✗ Backend Error: {response.status_code}")
                         
                 except Exception as e:
-                    st.error(f"Batch Processing Failed: {e}")
+                    st.error(f"✗ Batch Processing Failed: {e}")
     else:
-        st.info("📤 Upload multiple images to begin batch processing")
+        st.info("Upload multiple images to begin batch processing")
 
 # ===== PAGE 3: LIVE WEBCAM =====
-elif page == "📹 Live Webcam":
-    st.title("📹 Live Webcam Analysis")
-    st.markdown("### Real-Time Clock Detection")
+elif page == "▸ Live Webcam":
+    st.markdown('<div class="main-title">Live Webcam Analysis</div>', unsafe_allow_html=True)
+    st.markdown('<div class="subtitle">Real-Time Clock Detection</div>', unsafe_allow_html=True)
     
-    st.info("⚠️ This feature requires webcam access. Make sure to allow access when prompted.")
+    st.info("⚠ This feature requires webcam access. Make sure to allow access when prompted.")
     
     # Note: Simplified webcam implementation
-    st.warning("🚧 Live webcam feature coming soon! For now, please use the Analysis or Batch pages.")
+    st.warning("Live webcam feature coming soon! For now, please use the Analysis or Batch pages.")
     st.markdown("""
     **Planned Features:**
     - Real-time frame capture from webcam
@@ -282,17 +342,17 @@ elif page == "📹 Live Webcam":
     """)
 
 # ===== PAGE 4: PERFORMANCE DASHBOARD =====
-elif page == "📈 Performance Dashboard":
-    st.title("📈 Performance Dashboard")
-    st.markdown("### Real-Time System Metrics & Analytics")
+elif page == "▸ Performance Dashboard":
+    st.markdown('<div class="main-title">Performance Dashboard</div>', unsafe_allow_html=True)
+    st.markdown('<div class="subtitle">Real-Time System Metrics & Analytics</div>', unsafe_allow_html=True)
     
     # Refresh button
     col1, col2, col3 = st.columns([1, 1, 4])
     with col1:
-        if st.button("🔄 Refresh Metrics"):
+        if st.button("↻ Refresh Metrics"):
             st.rerun()
     with col2:
-        if st.button("🗑️ Clear Metrics"):
+        if st.button("⊗ Clear Metrics"):
             requests.post(f"{API_URL}/metrics/clear")
             st.success("Metrics cleared!")
             st.rerun()
@@ -303,7 +363,7 @@ elif page == "📈 Performance Dashboard":
             metrics = response.json()
             
             # Key Metrics
-            st.subheader("📊 Key Performance Indicators")
+            st.subheader("Key Performance Indicators")
             col1, col2, col3, col4, col5 = st.columns(5)
             
             col1.metric("Total Analyses", metrics["total_analyses"])
@@ -320,7 +380,7 @@ elif page == "📈 Performance Dashboard":
                 
                 with chart_col1:
                     # Component Usage Pie Chart
-                    st.subheader("⚙️ Component Usage")
+                    st.subheader("Component Usage Analysis")
                     comp_usage = metrics["component_usage"]
                     fig_comp = go.Figure(data=[go.Pie(
                         labels=list(comp_usage.keys()),
@@ -332,7 +392,7 @@ elif page == "📈 Performance Dashboard":
                 
                 with chart_col2:
                     # Method Usage Bar Chart
-                    st.subheader("🛤️ Method Distribution")
+                    st.subheader("Method Distribution")
                     method_usage = metrics["method_usage"]
                     fig_method = px.bar(
                         x=list(method_usage.keys()),
@@ -345,7 +405,7 @@ elif page == "📈 Performance Dashboard":
                     st.plotly_chart(fig_method, use_container_width=True)
                 
                 # Processing Time Chart
-                st.subheader("⏱️ Processing Time Analysis")
+                st.subheader("Processing Time Statistics")
                 time_data = metrics["time_breakdown"]
                 
                 col_a, col_b, col_c = st.columns(3)
@@ -359,10 +419,11 @@ elif page == "📈 Performance Dashboard":
                         labels={"y": "Time (s)", "index": "Analysis #"},
                         title="Processing Time Trend (Last 20)"
                     )
+                    fig_times.update_layout(height=350)
                     st.plotly_chart(fig_times, use_container_width=True)
                 
                 # Recent Analyses
-                st.subheader("📝 Recent Analyses")
+                st.subheader("Recent Analyses")
                 if metrics["recent_analyses"]:
                     recent_df = pd.DataFrame(metrics["recent_analyses"])
                     display_cols = ["timestamp", "image_name", "processing_time", "success", "method", "time_detected"]
@@ -370,11 +431,11 @@ elif page == "📈 Performance Dashboard":
                     st.dataframe(recent_df[available_cols], use_container_width=True)
                 
                 # Export Metrics
-                st.subheader("💾 Export Metrics")
+                st.subheader("Export Metrics")
                 col1, col2 = st.columns(2)
                 
                 with col1:
-                    if st.button("📥 Download Full Metrics (CSV)"):
+                    if st.button("⇓ Download Metrics (CSV)"):
                         csv_response = requests.get(f"{API_URL}/metrics/export")
                         if csv_response.status_code == 200:
                             st.download_button(
@@ -385,16 +446,16 @@ elif page == "📈 Performance Dashboard":
                             )
                 
                 with col2:
-                    st.info(f"⏰ System Uptime: {metrics['uptime']:.2f} hours")
+                    st.info(f"System Uptime: {metrics['uptime']:.2f} hours")
             
             else:
-                st.info("📭 No analyses performed yet. Run some analyses to see metrics here!")
+                st.info("No analyses performed yet. Run some analyses to see metrics here!")
         
         else:
             st.error("Failed to retrieve metrics from backend")
             
     except Exception as e:
-        st.error(f"Error loading metrics: {e}")
+        st.error(f"✗ Error loading metrics: {e}")
         st.info("Make sure the backend server is running at http://localhost:8000")
 
 # Footer
