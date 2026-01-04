@@ -29,21 +29,19 @@ st.set_page_config(page_title="Clock AI Research", layout="wide", page_icon="�
 class ClockProcessor(VideoProcessorBase):
     def __init__(self):
         self.frame_count = 0
-        self.last_time = time.time()
         self.fps = 0
+        self.last_time = time.time()
         self.force_expert = False 
+        self.last_result = None # Store the last result to show during skipped frames
         
-        # Now this import will work because we fixed sys.path at the top
         from app.core.engine import ClockEngine
-        
-        # Initialize Engine with the correct base directory (Project Root)
-        # We use the parent_dir calculated at the top of the file
+        # Initialize Engine (Using the path fix from earlier)
         self.engine = ClockEngine(parent_dir)
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         img = frame.to_ndarray(format="bgr24")
         
-        # 1. Measure FPS
+        # 1. Update FPS
         self.frame_count += 1
         now = time.time()
         if now - self.last_time > 1:
@@ -51,39 +49,37 @@ class ClockProcessor(VideoProcessorBase):
             self.frame_count = 0
             self.last_time = now
 
-        # 2. Run Analysis (Fast Path is recommended for Live Feed)
-        # We catch errors so the video stream doesn't crash
-        try:
-            # We call the engine directly to avoid HTTP overhead
-            result = self.engine.analyze(img, force_expert=self.force_expert)
+        # 2. FRAME SKIPPING OPTIMIZATION
+        # Only run AI every 5th frame (Adjust this number if still slow)
+        if self.frame_count % 5 == 0:
+            try:
+                # Run the heavy AI
+                self.last_result = self.engine.analyze(img, force_expert=self.force_expert)
+            except Exception as e:
+                print(f"AI Error: {e}")
+        
+        # 3. Draw the LAST known result (keeps video smooth)
+        if self.last_result:
+            res = self.last_result
             
-            # 3. Draw Results on the Frame
-            if "visualizations" in result and "c1_detection" in result["visualizations"]:
-                # If C1 found a clock, draw the info
-                # Note: engine returns a clean crop in viz, but we want to draw on the MAIN image.
-                # So we simply overlay text and bounding boxes if available.
-                
-                # Check debug info to find coordinates (simple parsing)
-                # Or better: Just use the result text
-                
-                cv2.putText(img, f"TIME: {result.get('time', '--:--')}", (50, 100), 
-                           cv2.FONT_HERSHEY_DUPLEX, 2, (0, 255, 0), 4)
-                
-                method = result.get('method', 'Unknown')
-                color = (0, 255, 0) if "Fast" in method else (0, 0, 255)
-                cv2.putText(img, f"Mode: {method}", (50, 150), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
-                
-                if "angles" in result:
-                    a1 = result["angles"]["hand1"]
-                    a2 = result["angles"]["hand2"]
-                    cv2.putText(img, f"H:{a1:.0f} M:{a2:.0f}", (50, 190), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+            # Draw Time
+            cv2.putText(img, f"TIME: {res.get('time', '--:--')}", (50, 100), 
+                       cv2.FONT_HERSHEY_DUPLEX, 1.5, (0, 255, 0), 3)
+            
+            # Draw Mode
+            method = res.get('method', 'Unknown')
+            color = (0, 255, 0) if "Fast" in method else (0, 0, 255)
+            cv2.putText(img, f"Mode: {method}", (50, 150), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+            
+            # Draw Angles
+            if "angles" in res:
+                a1 = res["angles"]["hand1"]
+                a2 = res["angles"]["hand2"]
+                cv2.putText(img, f"H:{a1:.0f} M:{a2:.0f}", (50, 190), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
 
-        except Exception as e:
-            print(f"Frame Error: {e}")
-
-        # 4. Draw Stats
+        # 4. Draw FPS
         cv2.putText(img, f"FPS: {self.fps}", (20, 40), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
 
@@ -219,7 +215,7 @@ elif page == "📹 Live Webcam":
             {"urls": ["stun:stun.services.mozilla.com"]},
         ]
     })
-    
+
     col1, col2 = st.columns([3, 1])
     
     with col1:
@@ -243,6 +239,13 @@ elif page == "📹 Live Webcam":
                 st.warning("⚠️ Expert Mode is heavier. FPS may drop.")
             else:
                 st.success("🚀 Fast Path Active")
+
+        st.markdown("---")
+        
+        # NEW: Hard Reset Button
+        if st.button("🔄 Reset Connection"):
+            st.cache_resource.clear()
+            st.rerun()
 
 # ==========================================
 # PAGE 3: BATCH PROCESSING
