@@ -14,10 +14,12 @@ import time
 import sys
 import os
 
+# --- PATH FIX: Add project root to Python path ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.abspath(os.path.join(current_dir, ".."))
 if parent_dir not in sys.path:
     sys.path.append(parent_dir)
+# -------------------------------------------------
 
 # Configuration
 API_URL = "http://localhost:8000"
@@ -34,8 +36,8 @@ class ClockProcessor(VideoProcessorBase):
         self.force_expert = False 
         self.last_result = None # Store the last result to show during skipped frames
         
+        # Initialize Engine with the correct base directory (Project Root)
         from app.core.engine import ClockEngine
-        # Initialize Engine (Using the path fix from earlier)
         self.engine = ClockEngine(parent_dir)
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
@@ -50,7 +52,7 @@ class ClockProcessor(VideoProcessorBase):
             self.last_time = now
 
         # 2. FRAME SKIPPING OPTIMIZATION
-        # Only run AI every 5th frame (Adjust this number if still slow)
+        # Only run AI every 5th frame to prevent lag
         if self.frame_count % 5 == 0:
             try:
                 # Run the heavy AI
@@ -155,9 +157,6 @@ def display_results(data):
 # 📱 SIDEBAR & NAVIGATION
 # ==========================================
 st.sidebar.title("🕰️ Clock AI Research")
-st.sidebar.markdown("### Multi-Model Ensemble Architecture")
-st.sidebar.markdown("#### for Analog Clock Reading")
-st.sidebar.markdown("---")
 st.sidebar.markdown("### Navigation")
 
 page = st.sidebar.radio(
@@ -245,7 +244,7 @@ elif page == "📹 Live Webcam":
 
         st.markdown("---")
         
-        # NEW: Hard Reset Button
+        # Hard Reset Button
         if st.button("🔄 Reset Connection"):
             st.cache_resource.clear()
             st.rerun()
@@ -265,8 +264,10 @@ elif page == "📦 Batch Processing":
                 if res.status_code == 200:
                     data = res.json()
                     st.success(f"Processed {data['total_images']} images!")
+                    
                     df = pd.DataFrame(data["results"])
                     st.dataframe(df, use_container_width=True)
+                    
                     if not df.empty:
                         fig = px.pie(df, names="method", title="Batch Method Distribution", 
                                      color_discrete_sequence=px.colors.sequential.RdBu)
@@ -291,6 +292,8 @@ elif page == "📈 Performance Dashboard":
 
     try:
         metrics = requests.get(f"{API_URL}/metrics").json()
+        
+        # 1. KPI Cards
         k1, k2, k3, k4 = st.columns(4)
         k1.metric("Total Scans", metrics["total_analyses"], delta="Count")
         k2.metric("Success Rate", f"{metrics['success_rate']:.1f}%", delta="Reliability")
@@ -299,6 +302,7 @@ elif page == "📈 Performance Dashboard":
         
         st.markdown("---")
 
+        # 2. Charts
         c1, c2 = st.columns(2)
         with c1:
             st.markdown("### 🛤️ Logic Path Distribution")
@@ -308,13 +312,19 @@ elif page == "📈 Performance Dashboard":
                     text="Count", title="Fast Path vs Expert Path",
                     color_discrete_map={"Fast Path (C1+C2+C4)": "#00CC96", "Expert Path (C1+C2+C3+C4)": "#EF553B"})
                 st.plotly_chart(fig_m, use_container_width=True)
+            else:
+                st.info("No data recorded yet.")
+
         with c2:
             st.markdown("### ⚙️ Component Activation")
             df_comp = pd.DataFrame(list(metrics["component_usage"].items()), columns=["Component", "Count"])
             if not df_comp.empty:
                 fig_c = px.pie(df_comp, names="Component", values="Count", hole=0.4, title="Component Utilization", color_discrete_sequence=px.colors.qualitative.Bold)
                 st.plotly_chart(fig_c, use_container_width=True)
+            else:
+                st.info("No data recorded yet.")
         
+        # 3. History Table
         st.subheader("📝 Live Transaction Log")
         hist = requests.get(f"{API_URL}/metrics/history").json()
         if hist:
@@ -323,6 +333,9 @@ elif page == "📈 Performance Dashboard":
                 available_cols = [c for c in ["id", "timestamp", "image_name", "method", "processing_time", "success"] if c in df_hist.columns]
                 df_hist = df_hist[available_cols]
             st.dataframe(df_hist, use_container_width=True)
+        else:
+            st.caption("Table is empty.")
 
     except Exception as e:
         st.error(f"Dashboard Error: {e}")
+        st.info("Ensure the Backend is running on Port 8000.")
