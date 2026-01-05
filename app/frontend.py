@@ -189,7 +189,7 @@ elif page == "Batch Processing":
                 st.dataframe(pd.DataFrame(data["results"]), use_container_width=True)
 
 elif page == "Performance Dashboard":
-    st.title("Analytics Dashboard (C4 Metrics)")
+    st.title("Analytics Dashboard")
     if st.button("Refresh"): st.rerun()
     try:
         metrics = requests.get(f"{API_URL}/metrics").json()
