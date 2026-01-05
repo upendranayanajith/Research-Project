@@ -192,7 +192,6 @@ if page == "📊 Analysis (Upload)":
                 files = {"file": ("image.jpg", img_byte_arr.getvalue(), "image/jpeg")}
                 data_form = {"force_expert": str(force_expert)}
 
-<<<<<<< HEAD
                 response = requests.post(f"{API_URL}/analyze", files=files, data=data_form)
                 
                 if response.status_code == 200:
