@@ -25,6 +25,13 @@ if parent_dir not in sys.path:
 API_URL = "http://localhost:8000"
 st.set_page_config(page_title="Clock AI Research", layout="wide", page_icon="🕰️")
 
+# Load Google Material Symbols (icons)
+st.markdown('<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined" rel="stylesheet">', unsafe_allow_html=True)
+
+def icon(name, size=18):
+    """Return HTML for a Material Symbol icon (use with `unsafe_allow_html=True`)."""
+    return f'<span class="material-symbols-outlined" style="font-size:{size}px; vertical-align: middle;">{name}</span>'
+
 # ==========================================
 # [C1 & C2] REAL-TIME PROCESSOR
 # ==========================================
@@ -111,7 +118,7 @@ def display_results(data):
     
     with tab3:
         # [UPDATED] Shows the image with Marked Angles + Metric Cards
-        st.markdown("### Angle Predictions")
+        st.markdown(f"### {icon('insights')} Angle Predictions", unsafe_allow_html=True)
         if "c3_angles" in viz:
             st.image(base64.b64decode(viz["c3_angles"]), caption="Angle Estimation (Visual)", width=500)
         
@@ -131,10 +138,10 @@ def display_results(data):
                 st.markdown("**XAI Attention Map (Grad-CAM)**")
                 st.image(base64.b64decode(data["heatmap_b64"]), caption="Model Focus Area", width=500)
         else: 
-            st.info("Fast Path Used - Deep Learning (C3) was skipped for efficiency.")
+            st.markdown(f"{icon('flash_on')} **Fast Path Used** - Deep Learning (C3) was skipped for efficiency.", unsafe_allow_html=True)
             
     with tab4:
-        st.markdown(f"# Time: {res['time']}")
+        st.markdown(f"# {icon('schedule')} Time: {res['time']}", unsafe_allow_html=True)
         st.code(res.get("reasoning", "No reasoning provided"))
 
 # ==========================================
@@ -144,13 +151,17 @@ if os.path.exists(logo_path):
     st.sidebar.image(logo_path, width=150)
 else:
     st.sidebar.warning("Logo not found")
-st.sidebar.markdown("### Navigation")
-page = st.sidebar.radio("Select Page", ["Analysis (Upload)", "Live Webcam", "Batch Processing", "Performance Dashboard"])
+
+# Sidebar navigation with icon
+st.sidebar.markdown(f"### {icon('menu')} Navigation", unsafe_allow_html=True)
+page = st.sidebar.radio("Select Page", ["📊 Analysis (Upload)", "📹 Live Webcam", "📦 Batch Processing", "📈 Performance Dashboard"]) 
 
 if page == "Analysis (Upload)":
-    st.title("File Analysis")
+    st.markdown(f"## {icon('cloud_upload')} File Analysis", unsafe_allow_html=True)
     uploaded_file = st.file_uploader("Choose an image...", type=["jpg", "png", "jpeg"])
-    force_expert = st.checkbox("Force Expert Path (Activate C3 + XAI)", value=False)
+    # Label + checkbox layout using icon (checkbox kept simple for accessibility)
+    st.markdown(f"{icon('military_tech')} **Force Expert Path (Activate C3 + XAI)**", unsafe_allow_html=True)
+    force_expert = st.checkbox("", value=False)
 
     if uploaded_file and st.button("Run Analysis", type="primary"):
         with st.spinner("Processing..."):
@@ -166,18 +177,19 @@ if page == "Analysis (Upload)":
             except Exception as e: st.error(f"Connection Failed: {e}")
 
 elif page == "Live Webcam":
-    st.title("Real-Time Analysis")
+    st.markdown(f"## {icon('videocam')} Real-Time Analysis", unsafe_allow_html=True)
     rtc_configuration = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
     col1, col2 = st.columns([3, 1])
     with col1:
         ctx = webrtc_streamer(key="clock-ai", video_processor_factory=ClockProcessor, rtc_configuration=rtc_configuration, media_stream_constraints={"video": True, "audio": False}, async_processing=True)
     with col2:
         if ctx.video_processor:
-            ctx.video_processor.force_expert = st.checkbox("Force Expert Mode", value=False)
+            st.markdown(f"{icon('military_tech')} **Force Expert Mode**", unsafe_allow_html=True)
+            ctx.video_processor.force_expert = st.checkbox("", value=False)
         if st.button("🔄 Reset Connection"): st.cache_resource.clear(); st.rerun()
 
 elif page == "Batch Processing":
-    st.title("Batch Processing")
+    st.markdown(f"## {icon('cloud_queue')} Batch Processing", unsafe_allow_html=True)
     uploaded_files = st.file_uploader("Upload Images", accept_multiple_files=True)
     if uploaded_files and st.button("Process All"):
         files = [("files", (f.name, f.getvalue(), f.type)) for f in uploaded_files]
@@ -189,7 +201,7 @@ elif page == "Batch Processing":
                 st.dataframe(pd.DataFrame(data["results"]), use_container_width=True)
 
 elif page == "Performance Dashboard":
-    st.title("Analytics Dashboard")
+    st.markdown(f"## {icon('analytics')} Analytics Dashboard", unsafe_allow_html=True)
     if st.button("Refresh"): st.rerun()
     try:
         metrics = requests.get(f"{API_URL}/metrics").json()
