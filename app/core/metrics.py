@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Dict, List, Optional
 import pandas as pd
 
+# --- [C4] METRICS TRACKER CLASS (Member 4) ---
 class MetricsTracker:
     _instance = None
     _lock = threading.Lock()
@@ -14,15 +15,13 @@ class MetricsTracker:
             with cls._lock:
                 if cls._instance is None:
                     cls._instance = super().__new__(cls)
-                    # We do NOT init DB here anymore to avoid the AttributeError
                     cls._instance._initialized = False 
         return cls._instance
 
     def __init__(self):
-        # Prevent re-initialization if the object already exists
         if getattr(self, "_initialized", False):
             return
-            
+        
         self.db_path = "analytics.db"
         self._init_db()
         self._initialized = True
@@ -56,7 +55,6 @@ class MetricsTracker:
             confidence = str(result.get("confidence", "Unknown"))
             error_msg = str(result.get("error", ""))
             
-            # Extract components for storage
             comps = []
             if "C1" in method: comps.append("C1")
             if "C2" in method: comps.append("C2")
@@ -80,20 +78,16 @@ class MetricsTracker:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
 
-                # Basic Counts
                 total = cursor.execute("SELECT COUNT(*) FROM analytics").fetchone()[0]
                 success = cursor.execute("SELECT COUNT(*) FROM analytics WHERE success=1").fetchone()[0]
                 failed = total - success
                 
-                # Averages
                 avg_time_row = cursor.execute("SELECT AVG(processing_time) FROM analytics").fetchone()
                 avg_time = avg_time_row[0] if avg_time_row[0] is not None else 0.0
 
-                # Method Usage
                 methods = cursor.execute("SELECT method, COUNT(*) FROM analytics GROUP BY method").fetchall()
                 method_usage = {row[0]: row[1] for row in methods}
 
-                # Component Usage
                 all_comps = cursor.execute("SELECT components_used FROM analytics").fetchall()
                 comp_usage = {"C1": 0, "C2": 0, "C3": 0, "C4": 0}
                 for row in all_comps:
@@ -116,14 +110,9 @@ class MetricsTracker:
                 }
         except Exception as e:
             print(f"Error fetching metrics: {e}")
-            return {
-                "total_analyses": 0, "success_count": 0, "failure_count": 0,
-                "success_rate": 0, "avg_processing_time": 0,
-                "method_usage": {}, "component_usage": {}
-            }
+            return {"total_analyses": 0, "success_rate": 0}
 
     def get_history(self, limit=100) -> List[Dict]:
-        """Fetch raw rows for the dashboard table"""
         try:
             with sqlite3.connect(self.db_path) as conn:
                 conn.row_factory = sqlite3.Row
@@ -133,7 +122,6 @@ class MetricsTracker:
             return []
 
     def clear_metrics(self):
-        """Wipe the database"""
         try:
             with sqlite3.connect(self.db_path) as conn:
                 conn.execute("DELETE FROM analytics")
@@ -141,27 +129,20 @@ class MetricsTracker:
             pass
 
     def export_to_csv(self) -> str:
-        """Export DB to CSV string"""
         import io
         import csv
-        
         output = io.StringIO()
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.execute("SELECT * FROM analytics")
                 rows = cursor.fetchall()
-                
-                if not rows:
-                    return "No Data"
-
-                # Get headers
+                if not rows: return "No Data"
                 headers = [description[0] for description in cursor.description]
                 writer = csv.writer(output)
                 writer.writerow(headers)
                 writer.writerows(rows)
         except Exception as e:
             return f"Error exporting CSV: {e}"
-            
         return output.getvalue()
 
 metrics_tracker = MetricsTracker()
