@@ -22,7 +22,6 @@ class ClockEngine:
         self.c2_model = self._load_yolo(self.c2_path, "C2")
         
         # --- [C3] ANGLE PREDICTION MODELS (Member 3) ---
-        # Loads ResNet-18 for Expert Angle Refinement
         self.c3_path = os.path.join(base_dir, "models", "c3_angle_regression", "best.pth")
         print(f"Loading C3: {self.c3_path}...")
         self.c3_model = self._get_c3_arch().to(self.device)
@@ -30,13 +29,12 @@ class ClockEngine:
         if os.path.exists(self.c3_path):
             self.c3_model.load_state_dict(torch.load(self.c3_path, map_location=self.device))
             self.c3_model.eval()
-            self.xai = XaiVisualizer(self.c3_model[0])  # XAI Integration
+            self.xai = XaiVisualizer(self.c3_model[0]) 
         else:
             print("⚠️ WARNING: C3 weights not found.")
             self.c3_model = None
 
         # --- [C4] PHYSICS LOGIC CONSTANTS (Member 4) ---
-        # Pre-calculated theoretical positions for physics validation
         self.possible_minutes = np.arange(0, 720)
         self.theory_h = (self.possible_minutes * 0.5) % 360
         self.theory_m = (self.possible_minutes * 6.0) % 360
@@ -49,7 +47,6 @@ class ClockEngine:
         ])
 
     def _load_yolo(self, path, name):
-        """Helper for C1 & C2 Model Loading"""
         try:
             print(f"Loading {name}: {path}...")
             return YOLO(path)
@@ -57,31 +54,21 @@ class ClockEngine:
             print(f"⚠️ {name} Failed: {e}")
             return None
 
-    # --- [C3] ANGLE ARCHITECTURE (Member 3) ---
     def _get_c3_arch(self):
-        """Defines the ResNet-18 architecture for angle regression"""
         model = models.resnet18(weights=None)
         num_ftrs = model.fc.in_features
         model.fc = nn.Linear(num_ftrs, 1)
         model = nn.Sequential(model, nn.Sigmoid())
         return model
 
-    # --- [C3] GEOMETRIC ANGLE CALCULATION (Member 3) ---
     def _get_angle(self, center, point):
-        """Converts vector coordinates to degrees (Fast Path)"""
         dx, dy = point[0] - center[0], point[1] - center[1]
         angle = math.degrees(math.atan2(dx, -dy))
         return angle + 360 if angle < 0 else angle
 
-    # --- [C4] PHYSICS LOGIC ENGINE (Member 4) ---
     def _solve_physics(self, a1, a2):
-        """
-        Validates Hour (a1) and Minute (a2) relationship.
-        Returns: Hour, Minute, and Error Score.
-        """
         err_a = np.abs(a1 - self.theory_h) + np.abs(a2 - self.theory_m)
         err_a = np.minimum(err_a, 720 - err_a)
-        
         err_b = np.abs(a2 - self.theory_h) + np.abs(a1 - self.theory_m)
         err_b = np.minimum(err_b, 720 - err_b)
 
@@ -92,9 +79,7 @@ class ClockEngine:
             idx = np.argmin(err_b)
             return int(idx // 60) if int(idx // 60) != 0 else 12, int(idx % 60), np.min(err_b)
 
-    # --- [C3] CROPPING HELPER (Member 3) ---
     def _get_crop(self, img, center, angle):
-        """Crops the hand for ResNet analysis"""
         h, w = img.shape[:2]
         M = cv2.getRotationMatrix2D((center[0], center[1]), angle, 1.0)
         rotated = cv2.warpAffine(img, M, (w, h), borderValue=(255,255,255))
@@ -104,9 +89,11 @@ class ClockEngine:
         if x1 < 0 or y1 < 0 or x2 > w or y2 > h: return np.array([])
         return rotated[y1:y2, x1:x2]
 
-    # --- [C1] LOCALIZATION LOGIC (Member 1) ---
+    def _resize_small(self, img):
+        """Helper to force 500x500px output for dashboard efficiency"""
+        return cv2.resize(img, (500, 500), interpolation=cv2.INTER_LINEAR)
+
     def _localize_clock(self, img):
-        """Detects clock face and returns crop + bbox"""
         if self.c1_model is None: return img, False, None
         results = self.c1_model(img, verbose=False)[0]
         if len(results.boxes) == 0: return img, False, None
@@ -119,40 +106,63 @@ class ClockEngine:
         return img[y1:y2, x1:x2], True, (x1, y1, x2, y2)
 
     def _draw_bbox(self, img, bbox):
-        """C1 Visualization"""
         img_copy = img.copy()
         x1, y1, x2, y2 = bbox
         cv2.rectangle(img_copy, (x1, y1), (x2, y2), (0, 255, 255), 3)
         cv2.putText(img_copy, "Clock Detected", (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-        return img_copy
+        return self._resize_small(img_copy)
 
-    # --- [C2] HAND VISUALIZATION (Member 2) ---
-    def _draw_keypoints(self, img, center, tip1, tip2, a1, a2):
-        """C2 Visualization (Skeleton)"""
+    # --- [C2] SKELETON VISUALIZATION (No Text) ---
+    def _draw_skeleton(self, img, center, tip1, tip2):
         img_copy = img.copy()
         center_pt = (int(center[0]), int(center[1]))
         tip1_pt = (int(tip1[0]), int(tip1[1]))
         tip2_pt = (int(tip2[0]), int(tip2[1]))
+        
         cv2.line(img_copy, center_pt, tip1_pt, (0, 255, 0), 4)
         cv2.line(img_copy, center_pt, tip2_pt, (0, 0, 255), 4)
         cv2.circle(img_copy, center_pt, 8, (255, 0, 0), -1)
         cv2.circle(img_copy, tip1_pt, 8, (0, 255, 0), -1)
         cv2.circle(img_copy, tip2_pt, 8, (0, 0, 255), -1)
-        return img_copy
+        
+        return self._resize_small(img_copy)
+
+    # --- [C3] ANGLE VISUALIZATION (With Text) ---
+    def _draw_angles_on_img(self, img, center, tip1, tip2, a1, a2):
+        img_copy = img.copy()
+        center_pt = (int(center[0]), int(center[1]))
+        tip1_pt = (int(tip1[0]), int(tip1[1]))
+        tip2_pt = (int(tip2[0]), int(tip2[1]))
+        
+        cv2.line(img_copy, center_pt, tip1_pt, (0, 255, 0), 4)
+        cv2.line(img_copy, center_pt, tip2_pt, (0, 0, 255), 4)
+        cv2.circle(img_copy, center_pt, 8, (255, 0, 0), -1)
+        cv2.circle(img_copy, tip1_pt, 8, (0, 255, 0), -1)
+        cv2.circle(img_copy, tip2_pt, 8, (0, 0, 255), -1)
+        
+        # TEXT
+        cv2.putText(img_copy, f"H: {a1:.1f}", (10, 30), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+        cv2.putText(img_copy, f"M: {a2:.1f}", (10, 60), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+        
+        return self._resize_small(img_copy)
 
     def analyze(self, img_array, force_expert=False):
         debug_info = []
         visualizations = {}
 
-        # --- [C1] STAGE 1: LOCALIZATION (Member 1) ---
+        # --- [C1] LOCALIZATION ---
         clock_crop, found_clock, bbox = self._localize_clock(img_array)
         debug_info.append("C1: Clock Found" if found_clock else "C1: Full Scan")
+        
+        # [Updated] Resize C1 output too
         if found_clock and bbox:
             visualizations['c1_detection'] = self._draw_bbox(img_array, bbox)
         else:
-            visualizations['c1_detection'] = img_array.copy()
+            visualizations['c1_detection'] = self._resize_small(img_array.copy())
 
-        # --- [C2] STAGE 2: HAND POSE (Member 2) ---
+        # --- [C2] HAND POSE ---
         if self.c2_model is None: return {"error": "Model files missing."}
         results = self.c2_model(clock_crop, verbose=False)[0]
         if not results.keypoints or len(results.keypoints.data) == 0:
@@ -161,12 +171,17 @@ class ClockEngine:
         kpts = results.keypoints.data[0].cpu().numpy()
         center, tip1, tip2 = kpts[0][:2], kpts[1][:2], kpts[2][:2]
         
-        # --- [C3] STAGE 3: ANGLE PREDICTION (Fast Path) (Member 3) ---
+        # [C2 Viz] Skeleton Only (Small)
+        visualizations['c2_skeleton'] = self._draw_skeleton(clock_crop, center, tip1, tip2)
+
+        # --- [C3] ANGLE PREDICTION (Fast Path) ---
         a1 = self._get_angle(center, tip1)
         a2 = self._get_angle(center, tip2)
-        visualizations['c2_hands'] = self._draw_keypoints(clock_crop, center, tip1, tip2, a1, a2)
         
-        # --- [C4] STAGE 4: PHYSICS VALIDATION (Member 4) ---
+        # [C3 Viz] Skeleton + Angle Text (Small)
+        visualizations['c3_angles'] = self._draw_angles_on_img(clock_crop, center, tip1, tip2, a1, a2)
+        
+        # --- [C4] PHYSICS VALIDATION ---
         h, m, error = self._solve_physics(a1, a2)
         
         if error < 8.0 and not force_expert:
@@ -181,7 +196,7 @@ class ClockEngine:
                 "reasoning": f"Physics: H={a1:.1f}°, M={a2:.1f}° → Time={h}:{m:02d}"
             }
         
-        # --- [C3] EXPERT PATH REFINEMENT (Member 3) ---
+        # --- [C3] EXPERT PATH REFINEMENT ---
         else:
             if self.c3_model is None:
                 return {"time": f"{h}:{m:02d}", "method": "Fast Path (C3 Missing)", "visualizations": visualizations, "angles": {"hand1": a1, "hand2": a2}}
@@ -197,17 +212,14 @@ class ClockEngine:
                     continue
                 c3_crops.append(crop)
                 
-                # Preprocess for ResNet
                 pil_crop = Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
                 pil_resized = pil_crop.resize((64, 64))
                 t_input = self.c3_transform(pil_resized).unsqueeze(0).to(self.device)
                 
-                # [C3] Generate XAI Heatmap
                 if heatmap_img is None:
                     norm_crop = np.array(pil_resized, dtype=np.float32) / 255.0
                     heatmap_img = self.xai.generate(t_input, norm_crop)
 
-                # [C3] Predict Correction
                 with torch.no_grad():
                     pred = self.c3_model(t_input).item()
                 
@@ -223,7 +235,9 @@ class ClockEngine:
 
             visualizations['c3_crops'] = c3_crops
             
-            # [C4] FINAL PHYSICS CHECK ON REFINED ANGLES (Member 4)
+            # [C3 Viz Update] Update the angle image with refined angles if expert path ran
+            visualizations['c3_angles'] = self._draw_angles_on_img(clock_crop, center, tip1, tip2, refined_angles[0], refined_angles[1])
+            
             h_new, m_new, err_new = self._solve_physics(refined_angles[0], refined_angles[1])
             
             return {
@@ -234,5 +248,5 @@ class ClockEngine:
                 "debug": debug_info,
                 "visualizations": visualizations,
                 "angles": {"hand1": refined_angles[0], "hand2": refined_angles[1]},
-                "reasoning": f"Refined: H={refined_angles[0]:.1f}°, M={refined_angles[1]:.1f}° → Time={h_new}:{m_new:02d}"
+                "reasoning": f"Refined: H={refined_angles[0]:.1f}°, M={refined_angles[1]:.1f}° → Time={h_new}:{m:02d}"
             }
