@@ -11,6 +11,7 @@ from typing import List
 from app.core.engine import ClockEngine
 from app.core.metrics import metrics_tracker
 
+# --- [C4] API SETUP (Member 4) ---
 app = FastAPI(title="Clock AI Research - Multi-Stage Visualization")
 
 app.add_middleware(
@@ -24,6 +25,7 @@ app.add_middleware(
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 engine = ClockEngine(BASE_DIR)
 
+# --- [C4] MAIN ANALYSIS ENDPOINT (Member 4) ---
 @app.post("/analyze")
 async def analyze_clock(file: UploadFile = File(...), force_expert: bool = Form(False)):
     start_time = time.time()
@@ -32,17 +34,18 @@ async def analyze_clock(file: UploadFile = File(...), force_expert: bool = Form(
     nparr = np.frombuffer(contents, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
+    # Call the Engine (Integrated Logic)
     result = engine.analyze(img, force_expert=force_expert)
     
     processing_time = time.time() - start_time
     
-    # DB Record
+    # [C4] Log to Database
     metrics_tracker.record_analysis(result, processing_time, file.filename)
     
     if "error" in result:
         return {"result": result, "processing_time": processing_time}
     
-    # Handle Visualization Images
+    # [C4] Process Visualizations for API Response
     viz_base64 = {}
     if "visualizations" in result:
         for stage_name, stage_img in result["visualizations"].items():
@@ -70,6 +73,7 @@ async def analyze_clock(file: UploadFile = File(...), force_expert: bool = Form(
         "processing_time": processing_time
     }
 
+# --- [C4] BATCH PROCESSING (Member 4) ---
 @app.post("/analyze_batch")
 async def analyze_batch(files: List[UploadFile] = File(...), force_expert: bool = Form(False)):
     results = []
@@ -97,13 +101,13 @@ async def analyze_batch(files: List[UploadFile] = File(...), force_expert: bool 
     
     return {"total_images": len(files), "results": results}
 
+# --- [C4] METRICS ENDPOINTS (Member 4) ---
 @app.get("/metrics")
 async def get_metrics():
     return metrics_tracker.get_metrics()
 
 @app.get("/metrics/history")
 async def get_metrics_history():
-    """New endpoint to fetch raw rows for table"""
     return metrics_tracker.get_history(limit=50)
 
 @app.get("/metrics/export")
