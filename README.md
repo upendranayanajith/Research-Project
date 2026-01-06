@@ -45,42 +45,6 @@ Image Input
 
 ---
 
-## Project Structure
-Research-Project/
-├── app/ # Main application code
-│ ├── init.py
-│ ├── main.py # FastAPI backend server
-│ ├── frontend.py # Streamlit UI application
-│ └── core/ # Core processing logic
-│ ├── init.py
-│ ├── engine.py # ClockEngine (orchestrates all 4 components)
-│ ├── metrics.py # Analytics & performance tracking
-│ └── xai.py # Explainable AI visualizations (Grad-CAM)
-│
-├── models/ # Pre-trained model weights
-│ ├── c1_localization/
-│ │ └── best.pt # YOLOv8 clock localization model
-│ ├── c2_hands_skeleton/
-│ │ └── best.pt # YOLOv8 hand keypoint detection model
-│ └── c3_angle_regression/
-│ └── best.pth # ResNet-18 angle regression model
-│
-├── scripts/ # Utility and training scripts
-│ ├── c1_localization.py # C1 model training & validation
-│ ├── c2_.py # C2 dataset generation & testing
-│ ├── c3_.py # C3 angle regression utilities
-│ ├── c4_.py # C4 physics engine & reasoning
-│ ├── final_inference.py # End-to-end inference pipeline
-│ └── verify_models.py # Model verification utility
-│
-├── requirements.txt # Python dependencies
-├── setup_env.bat # Windows environment setup
-└── README.md # This file
-
-
-
----
-
 ## Project Dependencies
 
 ### Core AI & Computer Vision
