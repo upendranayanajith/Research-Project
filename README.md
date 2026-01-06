@@ -28,22 +28,6 @@
 | C3: Angle Regression | ResNet-18 | Predicts precise hour and minute hand angles |
 | C4: Physics Engine | Rule-based | Validates predictions using physics constraints |
 
-### Processing Pipeline
-
-Image Input
-│
-├─→ C1: Extract Clock ROI
-│
-├─→ C2: Detect Hand Keypoints
-│
-├─→ C3: Predict Hand Angles
-│ └─→ Fast Mode (Direct ML) / Expert Mode (Physics Validation)
-│
-└─→ C4: Physics-Based Validation
-└─→ Output Time & Metadata
-
-
----
 
 ## Project Dependencies
 
