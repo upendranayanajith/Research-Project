@@ -48,28 +48,28 @@ Image Input
 ## Project Dependencies
 
 ### Core AI & Computer Vision
-- torch (>=2.5.0) - Deep learning framework
-- torchvision (>=0.20.0) - Computer vision utilities
-- ultralytics (>=8.3.0) - YOLOv8 implementation
-- opencv-python (>=4.8.0) - Image processing
-- numpy (>=1.24.0) - Numerical computing
-- Pillow (>=9.5.0) - Image handling
-- grad-cam (>=1.4.8) - Explainable AI visualizations
+- torch  - Deep learning framework
+- torchvision  - Computer vision utilities
+- ultralytics  - YOLOv8 implementation
+- opencv-python  - Image processing
+- numpy  - Numerical computing
+- Pillow  - Image handling
+- grad-cam  - Explainable AI visualizations
 
 ### Backend Framework
-- fastapi (>=0.100.0) - Modern Python web framework
-- uvicorn (>=0.23.0) - ASGI server
-- python-multipart (>=0.0.6) - Form data handling
+- fastapi  - Modern Python web framework
+- uvicorn  - ASGI server
+- python-multipart  - Form data handling
 
 ### Frontend Framework
-- streamlit (>=1.25.0) - Interactive UI framework
-- streamlit-webrtc (>=0.47.0) - Real-time video streaming
-- av (>=10.0.0) - Audio/video processing
-- requests (>=2.31.0) - HTTP client library
+- streamlit  - Interactive UI framework
+- streamlit-webrtc  - Real-time video streaming
+- av  - Audio/video processing
+- requests  - HTTP client library
 
 ### Data Analytics & Visualization
-- pandas (>=2.0.0) - Data manipulation
-- plotly (>=5.15.0) - Interactive visualizations
+- pandas - Data manipulation
+- plotly  - Interactive visualizations
 
 ---
 
