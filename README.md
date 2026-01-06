@@ -1,6 +1,6 @@
 ## Project Overview
 
-"MULTI MODEL ENSEMBLE ARCHITECTURE FOR ANALOG CLOCK READING" is a sophisticated deep learning system designed to analyze analog clock images through a multi-stage pipeline. The project combines state-of-the-art computer vision models with physics-based reasoning to accurately determine the time shown on a clock face.
+"Multi Model Ensemble Architecture For Analog Clock Reading" is a sophisticated deep learning system designed to analyze analog clock images through a multi-stage pipeline. The project combines state-of-the-art computer vision models with physics-based reasoning to accurately determine the time shown on a clock face.
 
 ### Key Features
 
