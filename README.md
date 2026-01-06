@@ -95,5 +95,5 @@ Swagger docs: http://localhost:8000/docs
 # Run the Backend
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 
-# Terminal 2: Start Frontend
+# Run the Frontend
 streamlit run app/frontend.py
