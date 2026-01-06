@@ -92,7 +92,7 @@ API endpoint: http://localhost:8000
 Swagger docs: http://localhost:8000/docs
 
 
-# Terminal 1: Start API
+# Run the Backend
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 # Terminal 2: Start Frontend
