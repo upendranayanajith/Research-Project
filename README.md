@@ -17,6 +17,7 @@
 ## Architecture
 
 ### System Architecture Diagram
+![Architecture Diagram](https://github.com/user-attachments/assets/038ae372-39b3-4138-a1fb-981a33f7abb4)
 
 
 ### Component Breakdown
