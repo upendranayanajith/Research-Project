@@ -37,7 +37,6 @@
 - ultralytics  - YOLOv8 implementation
 - opencv-python  - Image processing
 - numpy  - Numerical computing
-- Pillow  - Image handling
 - grad-cam  - Explainable AI visualizations
 
 ### Backend Framework
