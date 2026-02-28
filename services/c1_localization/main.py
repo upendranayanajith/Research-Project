@@ -36,6 +36,41 @@ def _encode_image(img):
     return base64.b64encode(buffer).decode('utf-8')
 
 
+def _enhance_image(img):
+    """CLAHE contrast enhancement + unsharp masking sharpening."""
+    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    l = clahe.apply(l)
+    enhanced = cv2.merge((l, a, b))
+    enhanced = cv2.cvtColor(enhanced, cv2.COLOR_LAB2BGR)
+    # Unsharp masking
+    gaussian = cv2.GaussianBlur(enhanced, (0, 0), 2.0)
+    sharpened = cv2.addWeighted(enhanced, 1.5, gaussian, -0.5, 0)
+    return sharpened
+
+
+def _deskew_clock(crop):
+    """Detect tilt angle via contour fitting and rotate crop to upright."""
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return crop
+    largest = max(contours, key=cv2.contourArea)
+    rect = cv2.minAreaRect(largest)
+    angle = rect[2]
+    # Normalize: minAreaRect returns angle in (-90, 0]
+    if angle < -45:
+        angle = 90 + angle
+    if abs(angle) < 2.0:  # Skip tiny corrections
+        return crop
+    h, w = crop.shape[:2]
+    M = cv2.getRotationMatrix2D((w // 2, h // 2), angle, 1.0)
+    rotated = cv2.warpAffine(crop, M, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+    return rotated
+
+
 @app.get("/health")
 async def health():
     return {"service": "C1-Localization", "status": "ok", "model_loaded": c1_model is not None}
@@ -63,7 +98,8 @@ async def localize(file: UploadFile = File(...)):
             "found": False,
             "bbox": None,
             "cropped_image": _encode_image(img),
-            "visualization": _encode_image(_resize_small(img))
+            "visualization": _encode_image(_resize_small(img)),
+            "error": "No clock face detected in the uploaded image. Please upload a clear photo of an analog clock."
         }
 
     # Best detection
@@ -75,6 +111,12 @@ async def localize(file: UploadFile = File(...)):
     x2_p, y2_p = min(w, x2 + pad), min(h, y2 + pad)
 
     cropped = img[y1_p:y2_p, x1_p:x2_p]
+
+    # Step 1: Deskew (correct tilt)
+    cropped = _deskew_clock(cropped)
+
+    # Step 2: Enhance image quality
+    cropped = _enhance_image(cropped)
 
     # Visualization with bounding box
     viz = img.copy()
