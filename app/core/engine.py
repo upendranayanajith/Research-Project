@@ -93,6 +93,37 @@ class ClockEngine:
         """Helper to force 500x500px output for dashboard efficiency"""
         return cv2.resize(img, (500, 500), interpolation=cv2.INTER_LINEAR)
 
+    def _enhance_image(self, img):
+        """CLAHE contrast enhancement + unsharp masking sharpening."""
+        lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(lab)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        l = clahe.apply(l)
+        enhanced = cv2.merge((l, a, b))
+        enhanced = cv2.cvtColor(enhanced, cv2.COLOR_LAB2BGR)
+        gaussian = cv2.GaussianBlur(enhanced, (0, 0), 2.0)
+        sharpened = cv2.addWeighted(enhanced, 1.5, gaussian, -0.5, 0)
+        return sharpened
+
+    def _deskew_clock(self, crop):
+        """Detect tilt angle via contour fitting and rotate crop to upright."""
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return crop
+        largest = max(contours, key=cv2.contourArea)
+        rect = cv2.minAreaRect(largest)
+        angle = rect[2]
+        if angle < -45:
+            angle = 90 + angle
+        if abs(angle) < 2.0:
+            return crop
+        h, w = crop.shape[:2]
+        M = cv2.getRotationMatrix2D((w // 2, h // 2), angle, 1.0)
+        rotated = cv2.warpAffine(crop, M, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+        return rotated
+
     def _localize_clock(self, img):
         if self.c1_model is None: return img, False, None
         results = self.c1_model(img, verbose=False)[0]
@@ -103,7 +134,10 @@ class ClockEngine:
         pad = 30
         x1, y1 = max(0, x1 - pad), max(0, y1 - pad)
         x2, y2 = min(w, x2 + pad), min(h, y2 + pad)
-        return img[y1:y2, x1:x2], True, (x1, y1, x2, y2)
+        crop = img[y1:y2, x1:x2]
+        crop = self._deskew_clock(crop)
+        crop = self._enhance_image(crop)
+        return crop, True, (x1, y1, x2, y2)
 
     def _draw_bbox(self, img, bbox):
         img_copy = img.copy()
@@ -161,12 +195,17 @@ class ClockEngine:
             visualizations['c1_detection'] = self._draw_bbox(img_array, bbox)
         else:
             visualizations['c1_detection'] = self._resize_small(img_array.copy())
+            return {
+                "error": "No clock face detected in the uploaded image. Please upload a clear photo of an analog clock."
+            }
 
         # --- [C2] HAND POSE ---
         if self.c2_model is None: return {"error": "Model files missing."}
         results = self.c2_model(clock_crop, verbose=False)[0]
         if not results.keypoints or len(results.keypoints.data) == 0:
-            return {"error": "C2 Failed: No hands found"}
+            return {
+                "error": "No clock face detected in the uploaded image. Please upload a clear photo of an analog clock."
+            }
         
         kpts = results.keypoints.data[0].cpu().numpy()
         center, tip1, tip2 = kpts[0][:2], kpts[1][:2], kpts[2][:2]
