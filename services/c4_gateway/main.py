@@ -41,7 +41,13 @@ async def analyze_clock(file: UploadFile = File(...), force_expert: bool = Form(
     # ========== STEP 1: C1 Localization ==========
     c1_result = call_c1(contents, file.filename)
     if "error" in c1_result and "found" not in c1_result:
-        return {"result": {"error": f"C1 Failed: {c1_result['error']}"}, "processing_time": time.time() - start_time}
+        return {"result": {"error": c1_result['error']}, "processing_time": time.time() - start_time}
+
+    if not c1_result.get("found"):
+        return {
+            "result": {"error": "No clock face detected in the uploaded image. Please upload a clear photo of an analog clock."},
+            "processing_time": time.time() - start_time
+        }
 
     debug_info.append("C1: Clock Found" if c1_result.get("found") else "C1: Full Scan")
     visualizations["c1_detection"] = c1_result.get("visualization")
@@ -50,7 +56,7 @@ async def analyze_clock(file: UploadFile = File(...), force_expert: bool = Form(
     # ========== STEP 2: C2 Skeleton Extraction (Enhanced) ==========
     c2_result = call_c2_enhanced(cropped_b64)
     if "error" in c2_result:
-        return {"result": {"error": f"C2 Failed: {c2_result['error']}"}, "processing_time": time.time() - start_time}
+        return {"result": {"error": c2_result['error']}, "processing_time": time.time() - start_time}
 
     keypoints = c2_result["keypoints"]
     angles = c2_result["angles"]
