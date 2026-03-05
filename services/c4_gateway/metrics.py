@@ -105,13 +105,52 @@ class MetricsTracker:
             print(f"Error fetching metrics: {e}")
             return {"total_analyses": 0, "success_rate": 0}
 
-    def get_history(self, limit=100) -> List[Dict]:
+    def get_history(
+        self,
+        limit: int = 100,
+        confidence_filter: str = None,
+        method_filter: str = None,
+        since_hours: float = None,
+    ) -> List[Dict]:
+        """
+        Return analysis history rows with optional filters.
+
+        Parameters
+        ----------
+        limit            : max rows to return
+        confidence_filter: exact match on `confidence` column (e.g. "High")
+        method_filter    : substring match on `method` column
+        since_hours      : only rows within the last N hours
+        """
         try:
+            clauses = []
+            params: List = []
+
+            if confidence_filter:
+                clauses.append("confidence = ?")
+                params.append(confidence_filter)
+            if method_filter:
+                clauses.append("method LIKE ?")
+                params.append(f"%{method_filter}%")
+            if since_hours is not None:
+                # SQLite datetime arithmetic: compare ISO timestamp strings
+                clauses.append(
+                    "timestamp >= datetime('now', ? || ' hours')"
+                )
+                params.append(f"-{since_hours:.2f}")
+
+            where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+            params.append(limit)
+
             with sqlite3.connect(self.db_path) as conn:
                 conn.row_factory = sqlite3.Row
-                cursor = conn.execute("SELECT * FROM analytics ORDER BY id DESC LIMIT ?", (limit,))
+                cursor = conn.execute(
+                    f"SELECT * FROM analytics {where} ORDER BY id DESC LIMIT ?",
+                    params,
+                )
                 return [dict(row) for row in cursor.fetchall()]
-        except:
+        except Exception as e:
+            print(f"get_history error: {e}")
             return []
 
     def clear_metrics(self):
