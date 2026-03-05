@@ -1,8 +1,3 @@
-"""
-C1 Localization Service — Clock Detection via YOLO
-Runs on port 8001
-Owner: Member 1
-"""
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 import cv2
