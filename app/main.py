@@ -24,15 +24,14 @@ app.add_middleware(
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# Initialize Engine (Default to Clock mode, but it can switch dynamically)
-engine = HARPEngine(BASE_DIR, mode='clock')
+# Initialize Engine
+engine = HARPEngine(BASE_DIR)
 
 # --- [C4] MAIN ANALYSIS ENDPOINT ---
 @app.post("/analyze")
 async def analyze_image(
     file: UploadFile = File(...), 
-    force_expert: bool = Form(False),
-    mode: str = Form("clock") # New Parameter: 'clock' or 'gauge'
+    force_expert: bool = Form(False)
 ):
     start_time = time.time()
     
@@ -48,11 +47,7 @@ async def analyze_image(
         }
 
 
-    # 2. Switch Engine Mode Dynamically
-    if engine.mode != mode:
-        engine.set_mode(mode)
-
-    # 3. Call the Engine
+    # 2. Call the Engine
     result = engine.analyze(img, force_expert=force_expert)
     
     processing_time = time.time() - start_time
@@ -104,14 +99,9 @@ async def analyze_image(
 @app.post("/analyze_batch")
 async def analyze_batch(
     files: List[UploadFile] = File(...), 
-    force_expert: bool = Form(False),
-    mode: str = Form("clock")
+    force_expert: bool = Form(False)
 ):
     results = []
-    
-    # Ensure correct mode for the batch
-    if engine.mode != mode:
-        engine.set_mode(mode)
 
     for file in files:
         try:
@@ -138,7 +128,7 @@ async def analyze_batch(
         except Exception as e:
             results.append({"filename": file.filename, "success": False, "error": str(e)})
     
-    return {"total_images": len(files), "mode": mode, "results": results}
+    return {"total_images": len(files), "results": results}
 
 # --- [C4] METRICS ENDPOINTS ---
 @app.get("/metrics")

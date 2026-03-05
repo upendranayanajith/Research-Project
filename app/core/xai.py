@@ -6,6 +6,9 @@ from pytorch_grad_cam.utils.image import show_cam_on_image
 import google.generativeai as genai
 import os
 from PIL import Image
+from dotenv import load_dotenv
+
+load_dotenv()
 
 class XaiVisualizer:
     def __init__(self, model):
@@ -34,7 +37,7 @@ class XaiVisualizer:
 class SemanticExplainer:
     def __init__(self):
         # --- API KEY CONFIGURATION ---
-        self.api_key = "AIzaSyANdJ_TYftpxzYYAyyqbqtvKbYcqs-zM3c"
+        self.api_key = os.environ.get("GEMINI_API_KEY")
         
         if self.api_key:
             try:

@@ -11,9 +11,8 @@ from app.core.xai import XaiVisualizer, SemanticExplainer
 from app.core.metrics import calculate_gauge_reading  # Import the new gauge math
 
 class HARPEngine:
-    def __init__(self, base_dir, mode='clock'):
+    def __init__(self, base_dir):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.mode = mode # 'clock' or 'gauge'
         
         # --- [C1] LOCALIZATION (Gatekeepers) ---
         self.c1_clock_path = os.path.join(base_dir, "models", "c1_localization", "best.pt")
@@ -56,11 +55,7 @@ class HARPEngine:
             self.c3_model = None
             self.explainer = None
 
-    def set_mode(self, new_mode):
-        """Dynamically switch between reading Clocks and Gauges"""
-        if new_mode in ['clock', 'gauge']:
-            self.mode = new_mode
-            print(f"🔄 HARP Engine mode switched to: {self.mode.upper()}")
+
 
     def _load_yolo(self, path, name):
         try:
@@ -119,26 +114,37 @@ class HARPEngine:
         return cv2.resize(img, (300, 300), interpolation=cv2.INTER_LINEAR)
 
     def _localize_object(self, img):
-        # Dynamically select the correct Gatekeeper model
-        model = self.c1_clock_model if self.mode == 'clock' else self.c1_gauge_model
+        # Run both Gatekeeper models
+        clock_res = self.c1_clock_model(img, verbose=False)[0] if self.c1_clock_model else None
+        gauge_res = self.c1_gauge_model(img, verbose=False)[0] if self.c1_gauge_model else None
         
-        if model is None: return img, False, None
+        clock_conf, gauge_conf = -1, -1
+        clock_box, gauge_box = None, None
         
-        results = model(img, verbose=False)[0]
-        if len(results.boxes) == 0: return img, False, None
+        if clock_res and len(clock_res.boxes) > 0:
+            clock_box = clock_res.boxes[0]
+            clock_conf = clock_box.conf.item()
+            
+        if gauge_res and len(gauge_res.boxes) > 0:
+            gauge_box = gauge_res.boxes[0]
+            gauge_conf = gauge_box.conf.item()
+            
+        if clock_conf == -1 and gauge_conf == -1: return img, False, None, None
         
-        best_box = results.boxes[0]
+        detected_type = 'clock' if clock_conf > gauge_conf else 'gauge'
+        best_box = clock_box if detected_type == 'clock' else gauge_box
+        
         x1, y1, x2, y2 = map(int, best_box.xyxy[0])
         h, w = img.shape[:2]
         pad = 30
         x1, y1 = max(0, x1 - pad), max(0, y1 - pad)
         x2, y2 = min(w, x2 + pad), min(h, y2 + pad)
-        return img[y1:y2, x1:x2], True, (x1, y1, x2, y2)
+        return img[y1:y2, x1:x2], True, (x1, y1, x2, y2), detected_type
 
-    def _draw_bbox(self, img, bbox):
+    def _draw_bbox(self, img, bbox, detected_type):
         img_copy = img.copy()
         x1, y1, x2, y2 = bbox
-        label = f"{self.mode.capitalize()} Detected"
+        label = f"{detected_type.capitalize()} Detected"
         cv2.rectangle(img_copy, (x1, y1), (x2, y2), (0, 255, 255), 3)
         cv2.putText(img_copy, label, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
         return self._resize_small(img_copy)
@@ -182,42 +188,65 @@ class HARPEngine:
         visualizations = {}
 
         # --- [C1] LOCALIZATION (Runs dynamically for both modes now) ---
-        target_crop, found_object, bbox = self._localize_object(img_array)
+        target_crop, found_object, bbox, c1_detected_type = self._localize_object(img_array)
         
         if not found_object:
-            debug_info.append(f"C1: No {self.mode.capitalize()} Found - Stopping")
+            debug_info.append(f"C1: No Object Found - Stopping")
             visualizations['c1_detection'] = self._resize_small(img_array.copy())
             return {
                 "time": "N/A", 
-                "method": f"No {self.mode.capitalize()} Detected",
+                "method": f"No Object Detected",
                 "confidence": "0.0",
                 "heatmap": None,
                 "debug": debug_info,
                 "visualizations": visualizations,
                 "angles": {"hand1": 0.0, "hand2": 0.0},
-                "reasoning": f"Object is not a {self.mode}.",
-                "error": f"No {self.mode.capitalize()} Detected"
+                "reasoning": f"No valid clock or gauge detected.",
+                "error": f"No Object Detected"
             }
 
-        debug_info.append(f"C1: {self.mode.capitalize()} Found")
-        visualizations['c1_detection'] = self._draw_bbox(img_array, bbox)
+        debug_info.append(f"C1: Initial guess is {c1_detected_type.capitalize()}")
+
+        # --- [C2] CROSS-VALIDATION ---
+        # Instead of trusting C1 natively, we use C2 Specialists to validate presence of keypoints
+        c2_clock_conf = 0.0
+        c2_gauge_conf = 0.0
+        clock_kpts, gauge_kpts = None, None
+        clock_kpts_data, gauge_kpts_data = None, None
+        
+        if self.c2_clock_model:
+            c_res = self.c2_clock_model(target_crop, verbose=False)[0]
+            if c_res.keypoints and len(c_res.keypoints.data) > 0:
+                kpts = c_res.keypoints.data[0].cpu().numpy()
+                if len(kpts) >= 3:
+                    c2_clock_conf = np.mean(kpts[:3, 2]) # Average confidence of keypoints
+                    clock_kpts = kpts
+                    clock_kpts_data = c_res.keypoints
+                    
+        if self.c2_gauge_model:
+            g_res = self.c2_gauge_model(target_crop, verbose=False)[0]
+            if g_res.keypoints and len(g_res.keypoints.data) > 0:
+                kpts = g_res.keypoints.data[0].cpu().numpy()
+                if len(kpts) >= 4:
+                    c2_gauge_conf = np.mean(kpts[:4, 2]) # Average confidence of keypoints
+                    gauge_kpts = kpts
+                    gauge_kpts_data = g_res.keypoints
+
+        if c2_clock_conf == 0.0 and c2_gauge_conf == 0.0:
+             return {"error": "C2 Failed: Neither clock hands nor gauge skeleton found in the crop."}
+             
+        # The true type is whichever C2 model is more confident about its keypoints
+        detected_type = 'clock' if c2_clock_conf > c2_gauge_conf else 'gauge'
+        debug_info.append(f"C2 Validation: Chose {detected_type.capitalize()} (Clock KP Conf: {c2_clock_conf:.2f}, Gauge KP Conf: {c2_gauge_conf:.2f})")
+
+        visualizations['c1_detection'] = self._draw_bbox(img_array, bbox, detected_type)
 
         # ==========================================
         # GAUGE LOGIC PIPELINE
         # ==========================================
-        if self.mode == 'gauge':
-            if self.c2_gauge_model is None: return {"error": "C2 Gauge model missing."}
+        if detected_type == 'gauge':
             
-            # Feed the CROP directly to C2 Gauge
-            results = self.c2_gauge_model(target_crop, verbose=False)[0]
-            
-            # If C2 doesn't find keypoints inside the crop
-            if not results.keypoints or len(results.keypoints.data) == 0:
-                return {"error": "C2 Failed: No gauge skeleton found"}
-            
-            kpts = results.keypoints.data[0].cpu().numpy()
-            if len(kpts) < 4:
-                return {"error": f"Model Mix-up: Expected 4 points, but got {len(kpts)}. You likely have the Clock model loaded in the Gauge folder!"}
+            kpts = gauge_kpts
             
             center, min_pt, max_pt, tip = kpts[0][:2], kpts[1][:2], kpts[2][:2], kpts[3][:2]
             
@@ -241,13 +270,8 @@ class HARPEngine:
         # ==========================================
         # CLOCK LOGIC PIPELINE
         # ==========================================
-        elif self.mode == 'clock':
-            if self.c2_clock_model is None: return {"error": "C2 Clock model missing."}
-            results = self.c2_clock_model(target_crop, verbose=False)[0]
-            if not results.keypoints or len(results.keypoints.data) == 0:
-                return {"error": "C2 Failed: No clock hands found"}
-            
-            kpts = results.keypoints.data[0].cpu().numpy()
+        elif detected_type == 'clock':
+            kpts = clock_kpts
             center, tip1, tip2 = kpts[0][:2], kpts[1][:2], kpts[2][:2]
             
             a1 = self._get_angle(center, tip1)

@@ -40,11 +40,10 @@ class ClockProcessor(VideoProcessorBase):
         self.fps = 0
         self.last_time = time.time()
         self.force_expert = False 
-        self.mode = "clock" # Default mode
         self.last_result = None
         
         from app.core.engine import HARPEngine
-        self.engine = HARPEngine(parent_dir, mode=self.mode)
+        self.engine = HARPEngine(parent_dir)
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         img = frame.to_ndarray(format="bgr24")
@@ -57,9 +56,6 @@ class ClockProcessor(VideoProcessorBase):
             self.frame_count = 0
             self.last_time = now
 
-        # Switch engine mode dynamically if UI changed
-        if self.engine.mode != self.mode:
-            self.engine.set_mode(self.mode)
 
         # Process every 5th frame to save CPU
         if self.frame_count % 5 == 0:
@@ -81,7 +77,7 @@ class ClockProcessor(VideoProcessorBase):
             cv2.putText(img, f"Mode: {method}", (50, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
             
             # Only show angles if it's a clock
-            if self.mode == 'clock' and "angles" in res:
+            if "angles" in res and res["angles"].get("hand1", 0) != 0.0:
                 a1 = res["angles"].get("hand1", 0)
                 a2 = res["angles"].get("hand2", 0)
                 cv2.putText(img, f"H:{a1:.0f} M:{a2:.0f}", (50, 190), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
@@ -203,11 +199,8 @@ if st.session_state.page == "analysis":
     
     st.markdown("---")
     st.markdown(f"#### {icon('settings')} Configuration", unsafe_allow_html=True)
-    col_settings_1, col_settings_2 = st.columns(2)
-    with col_settings_1:
-         model_mode = st.radio("Select Instrument Type", ["clock", "gauge"], index=0, horizontal=True)
-    with col_settings_2:
-         force_expert = st.checkbox("Force Expert Path (Activate C3 + XAI)", value=False)
+    
+    force_expert = st.checkbox("Force Expert Path (Activate C3 + XAI)", value=False)
 
     if uploaded_file and st.button("Run Analysis", type="primary"):
         with st.spinner("Processing..."):
@@ -217,8 +210,7 @@ if st.session_state.page == "analysis":
                 image.save(img_byte_arr, format=image.format)
                 files = {"file": ("image.jpg", img_byte_arr.getvalue(), "image/jpeg")}
                 data_form = {
-                    "force_expert": str(force_expert),
-                    "mode": model_mode
+                    "force_expert": str(force_expert)
                 }
                 response = requests.post(f"{API_URL}/analyze", files=files, data=data_form)
                 if response.status_code == 200: display_results(response.json())
@@ -245,13 +237,8 @@ elif st.session_state.page == "webcam":
     with col2:
         st.markdown(f"### {icon('tune')} Controls", unsafe_allow_html=True)
         if ctx.video_processor:
-            # 1. Add Mode Toggle for Webcam
-            st.markdown(f"{icon('speed')} **Instrument Type**", unsafe_allow_html=True)
-            ctx.video_processor.mode = st.radio("Target", ["clock", "gauge"], index=0)
             
-            st.markdown("---")
-            
-            # 2. Expert Mode Toggle
+            # Expert Mode Toggle
             st.markdown(f"{icon('military_tech')} **Force Expert Mode**", unsafe_allow_html=True)
             ctx.video_processor.force_expert = st.checkbox("Enable C3/XAI", value=False)
             
@@ -263,11 +250,11 @@ elif st.session_state.page == "webcam":
 # --- PAGE 3: BATCH ---
 elif st.session_state.page == "batch":
     st.markdown(f"## {icon('perm_media')} Batch Processing", unsafe_allow_html=True)
-    model_mode_batch = st.radio("Select Instrument Type for Batch", ["clock", "gauge"], index=0, horizontal=True)
+    
     uploaded_files = st.file_uploader("Upload Images", accept_multiple_files=True)
     if uploaded_files and st.button("Process All"):
         files = [("files", (f.name, f.getvalue(), f.type)) for f in uploaded_files]
-        data_form = {"mode": model_mode_batch, "force_expert": "False"}
+        data_form = {"force_expert": "False"}
         with st.spinner("Processing Batch..."):
             try:
                 res = requests.post(f"{API_URL}/analyze_batch", files=files, data=data_form)
