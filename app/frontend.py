@@ -121,8 +121,101 @@ def display_results(data):
         st.markdown(f"{icon('crop_free')} **YOLO Localization**", unsafe_allow_html=True)
         if "c1_detection" in viz: st.image(base64.b64decode(viz["c1_detection"]), width=300)
     with tab2:
-        st.markdown(f"{icon('timeline')} **Hand Keypoints**", unsafe_allow_html=True)
-        if "c2_skeleton" in viz: st.image(base64.b64decode(viz["c2_skeleton"]), width=300)
+        st.markdown(f"{icon('timeline')} **C2 — Skeleton Structure Analysis**", unsafe_allow_html=True)
+        c2e = data.get("c2_enhanced", {})
+        c2v = data.get("c2_research_visuals", {})
+
+        if not c2e:
+            # Fallback: show basic skeleton only
+            if "c2_skeleton" in viz:
+                st.image(base64.b64decode(viz["c2_skeleton"]), width=350)
+            st.info("Enhanced C2 data not available.")
+        else:
+            # ── 6 Sub-Tabs ──────────────────────────────────────────────
+            s1, s2, s3, s4, s5, s6 = st.tabs([
+                "🦴 Skeleton", "🔭 Scale Analysis", "🧊 3D Reconstruction",
+                "🌍 Manifold", "⏱ Temporal", "📊 Impact Summary"
+            ])
+
+            with s1:
+                col_l, col_r = st.columns([2, 1])
+                with col_l:
+                    if "c2_skeleton" in viz:
+                        st.image(base64.b64decode(viz["c2_skeleton"]), caption="YOLO-Pose Skeleton", width=350)
+                with col_r:
+                    kp = data.get("result", {}).get("angles", res.get("angles", {}))
+                    if kp:
+                        st.metric("Hand 1 Angle", f"{kp.get('hand1', 0):.1f}°")
+                        st.metric("Hand 2 Angle", f"{kp.get('hand2', 0):.1f}°")
+
+            with s2:
+                sa = c2e.get("scale_analysis", {})
+                st.markdown("**GAP 3 — Multi-Scale LVM Oracle**")
+                st.caption("Selects optimal Gaussian scale σ* where graph structure best matches image content.")
+                if c2v.get("scale_pyramid"):
+                    st.image(base64.b64decode(c2v["scale_pyramid"]), caption="Scale Pyramid + LVM Scores", use_container_width=True)
+                col_a, col_b = st.columns(2)
+                col_a.metric("Optimal Scale σ*", sa.get("best_sigma", "—"))
+                col_b.metric("Confidence Margin", f"{sa.get('confidence_margin', 0):.3f}")
+                if sa.get("interpretation"):
+                    st.info(sa["interpretation"])
+
+            with s3:
+                r3d = c2e.get("reconstruction_3d", {})
+                st.markdown("**GAP 1 — Bayesian 3D Reconstruction**")
+                st.caption("Probabilistic graphical model: P(G|I) = P(I|G) × P(G) / P(I)")
+                if c2v.get("confidence_gauge"):
+                    st.image(base64.b64decode(c2v["confidence_gauge"]), caption="Confidence Gauge + Occlusion Risk", width=350)
+                col_a, col_b, col_c = st.columns(3)
+                col_a.metric("Confidence", f"{r3d.get('confidence', 0):.3f}")
+                col_b.metric("Occlusion Risk", r3d.get("occlusion_risk", "—"))
+                ha = r3d.get("hand_assignment", {})
+                if ha:
+                    col_c.metric("Hour Hand", ha.get("hour", "—"))
+                depths = r3d.get("hand_depths", {})
+                if depths:
+                    with st.expander("Depth Estimates"):
+                        st.json(depths)
+
+            with s4:
+                mf = c2e.get("manifold", {})
+                st.markdown("**GAP 4 — Non-Euclidean Manifold Skeleton**")
+                st.caption("Riemannian metric → geodesic vs Euclidean distance analysis.")
+                if c2v.get("curvature_heatmap"):
+                    st.image(base64.b64decode(c2v["curvature_heatmap"]), caption="Curvature Analysis", use_container_width=True)
+                col_a, col_b = st.columns(2)
+                col_a.metric("Surface Class", mf.get("surface_classification", "—"))
+                col_b.metric("Avg Curvature Ratio", f"{mf.get('average_curvature_ratio', 1.0):.3f}")
+                if mf.get("recommendation"):
+                    st.info(mf["recommendation"])
+
+            with s5:
+                tmp = c2e.get("temporal", {})
+                st.markdown("**GAP 2 — Persistent Homology Tracking**")
+                st.caption("Betti numbers measure topological features: β₀ = connected components, β₁ = loops.")
+                if c2v.get("betti_badge"):
+                    st.image(base64.b64decode(c2v["betti_badge"]), caption="Topology Status", width=300)
+                col_a, col_b, col_c = st.columns(3)
+                col_a.metric("β₀ (Components)", tmp.get("beta0", "—"))
+                col_b.metric("β₁ (Loops)", tmp.get("beta1", "—"))
+                col_c.metric("Status", tmp.get("topology_status", "—"))
+
+            with s6:
+                st.markdown("**Research Impact Summary**")
+                if c2v.get("comparison"):
+                    st.image(base64.b64decode(c2v["comparison"]), caption="Basic YOLO vs Enhanced Research Output", use_container_width=True)
+                if c2v.get("impact_kpis"):
+                    st.image(base64.b64decode(c2v["impact_kpis"]), caption="Key Performance Indicators", use_container_width=True)
+                st.markdown("---")
+                st.markdown("""
+                **What C2 Research Adds:**
+                - ✅ **3D Uncertainty Quantification** — confidence score + occlusion risk classification
+                - ✅ **Multi-Scale LVM Oracle** — selects optimal detection scale σ* automatically
+                - ✅ **Riemannian Manifold Analysis** — geodesic distance on curved clock surfaces
+                - ✅ **Persistent Homology Tracking** — topological consistency across video frames
+                - ✅ **LVM Temporal Smoothing** — rejects jittery detections using embedding distance
+                """)
+
     with tab3:
         st.markdown(f"{icon('psychology')} **Angle Predictions**", unsafe_allow_html=True)
         col_a, col_b = st.columns(2)
@@ -146,6 +239,27 @@ def display_results(data):
     with tab4:
         # ── Primary reading ───────────────────────────────────────────
         st.markdown(f"# {icon('schedule')} {res['time']}", unsafe_allow_html=True)
+
+        # ── C2 Research enrichments ──
+        unc = res.get('uncertainty', '')
+        c2_conf = res.get('c2_confidence', 0)
+        c2_occ = res.get('c2_occlusion_risk', 'UNKNOWN')
+        c2_ha = res.get('c2_hand_assignment', {})
+
+        if unc:
+            st.markdown(f"**Uncertainty:** `{res['time']} {unc}` (C2 Bayesian estimation)", unsafe_allow_html=True)
+
+        col_r1, col_r2, col_r3, col_r4 = st.columns(4)
+        col_r1.metric("C2 Confidence", f"{c2_conf:.2f}" if c2_conf else "—")
+        occ_icon = "✅" if c2_occ == "LOW" else ("⚠️" if c2_occ == "MEDIUM" else "🔴")
+        col_r2.metric("Occlusion Risk", f"{occ_icon} {c2_occ}")
+        col_r3.metric("Hour Hand", c2_ha.get('hour', '—'))
+        col_r4.metric("Minute Hand", c2_ha.get('minute', '—'))
+
+        if c2_occ == "HIGH":
+            st.warning("⚠️ High occlusion risk — result may be less reliable. Hands may overlap.")
+
+        st.markdown("---")
         st.markdown(f"**Reasoning:** `{res.get('reasoning', 'N/A')}`")
         st.markdown("---")
 
