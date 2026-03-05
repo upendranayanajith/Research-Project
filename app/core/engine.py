@@ -15,15 +15,17 @@ class HARPEngine:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.mode = mode # 'clock' or 'gauge'
         
-        # --- [C1] LOCALIZATION (Gatekeeper) ---
-        self.c1_path = os.path.join(base_dir, "models", "c1_localization", "best.pt")
-        self.c1_model = self._load_yolo(self.c1_path, "C1")
+        # --- [C1] LOCALIZATION (Gatekeepers) ---
+        self.c1_clock_path = os.path.join(base_dir, "models", "c1_localization", "best.pt")
+        self.c1_clock_model = self._load_yolo(self.c1_clock_path, "C1_Clock")
 
-        # --- [C2] CLOCK HAND POSE ---
+        self.c1_gauge_path = os.path.join(base_dir, "models", "c1_gauge_localization", "best.pt")
+        self.c1_gauge_model = self._load_yolo(self.c1_gauge_path, "C1_Gauge")
+
+        # --- [C2] STRUCTURE POSE (Specialists) ---
         self.c2_clock_path = os.path.join(base_dir, "models", "c2_hands_skeleton", "best.pt")
         self.c2_clock_model = self._load_yolo(self.c2_clock_path, "C2_Clock")
 
-        # --- [C2] GAUGE POSE (NEW) ---
         self.c2_gauge_path = os.path.join(base_dir, "models", "c2_gauge_skeleton", "best.pt")
         self.c2_gauge_model = self._load_yolo(self.c2_gauge_path, "C2_Gauge")
         
@@ -117,9 +119,14 @@ class HARPEngine:
         return cv2.resize(img, (300, 300), interpolation=cv2.INTER_LINEAR)
 
     def _localize_object(self, img):
-        if self.c1_model is None: return img, False, None
-        results = self.c1_model(img, verbose=False)[0]
+        # Dynamically select the correct Gatekeeper model
+        model = self.c1_clock_model if self.mode == 'clock' else self.c1_gauge_model
+        
+        if model is None: return img, False, None
+        
+        results = model(img, verbose=False)[0]
         if len(results.boxes) == 0: return img, False, None
+        
         best_box = results.boxes[0]
         x1, y1, x2, y2 = map(int, best_box.xyxy[0])
         h, w = img.shape[:2]
@@ -174,54 +181,54 @@ class HARPEngine:
         debug_info = []
         visualizations = {}
 
+        # --- [C1] LOCALIZATION (Runs dynamically for both modes now) ---
+        target_crop, found_object, bbox = self._localize_object(img_array)
+        
+        if not found_object:
+            debug_info.append(f"C1: No {self.mode.capitalize()} Found - Stopping")
+            visualizations['c1_detection'] = self._resize_small(img_array.copy())
+            return {
+                "time": "N/A", 
+                "method": f"No {self.mode.capitalize()} Detected",
+                "confidence": "0.0",
+                "heatmap": None,
+                "debug": debug_info,
+                "visualizations": visualizations,
+                "angles": {"hand1": 0.0, "hand2": 0.0},
+                "reasoning": f"Object is not a {self.mode}.",
+                "error": f"No {self.mode.capitalize()} Detected"
+            }
+
+        debug_info.append(f"C1: {self.mode.capitalize()} Found")
+        visualizations['c1_detection'] = self._draw_bbox(img_array, bbox)
+
         # ==========================================
-        # GAUGE LOGIC PIPELINE (Bypasses C1 Clock Gatekeeper)
+        # GAUGE LOGIC PIPELINE
         # ==========================================
         if self.mode == 'gauge':
             if self.c2_gauge_model is None: return {"error": "C2 Gauge model missing."}
             
-            # Feed the FULL image directly to C2 Gauge
-            results = self.c2_gauge_model(img_array, verbose=False)[0]
+            # Feed the CROP directly to C2 Gauge
+            results = self.c2_gauge_model(target_crop, verbose=False)[0]
             
-            # If C2 doesn't find a gauge OR keypoints
-            if len(results.boxes) == 0 or not results.keypoints or len(results.keypoints.data) == 0:
-                debug_info.append("C2: No Gauge Found - Stopping")
-                visualizations['c1_detection'] = self._resize_small(img_array.copy())
-                return {
-                    "time": "N/A", 
-                    "method": "No Gauge Detected",
-                    "confidence": "0.0",
-                    "heatmap": None,
-                    "debug": debug_info,
-                    "visualizations": visualizations,
-                    "angles": {"hand1": 0.0, "hand2": 0.0},
-                    "reasoning": "Object is not a gauge.",
-                    "error": "No Gauge Detected"
-                }
-
-            # 1. Create a "Fake" C1 Bounding Box for the UI using C2's detection
-            best_box = results.boxes[0]
-            bbox = tuple(map(int, best_box.xyxy[0]))
-            visualizations['c1_detection'] = self._draw_bbox(img_array, bbox)
-            debug_info.append("C2: Gauge Detected")
+            # If C2 doesn't find keypoints inside the crop
+            if not results.keypoints or len(results.keypoints.data) == 0:
+                return {"error": "C2 Failed: No gauge skeleton found"}
             
-            # 2. Extract Keypoints (Directly from the full image)
             kpts = results.keypoints.data[0].cpu().numpy()
             if len(kpts) < 4:
-                # The updated smarter error message!
                 return {"error": f"Model Mix-up: Expected 4 points, but got {len(kpts)}. You likely have the Clock model loaded in the Gauge folder!"}
             
             center, min_pt, max_pt, tip = kpts[0][:2], kpts[1][:2], kpts[2][:2], kpts[3][:2]
             
-            # 3. C4 Physics Logic 
+            # C4 Physics Logic 
             reading = calculate_gauge_reading([center, min_pt, max_pt, tip])
             
-            # 4. Draw Skeleton on the full image
-            visualizations['c2_skeleton'] = self._draw_gauge_skeleton(img_array, center, min_pt, max_pt, tip)
+            visualizations['c2_skeleton'] = self._draw_gauge_skeleton(target_crop, center, min_pt, max_pt, tip)
             
             return {
                 "time": f"{reading}%", # Re-using the 'time' key so frontend displays it natively
-                "method": "Gauge Reading (C2+C4)",
+                "method": "Gauge Reading (C1+C2+C4)",
                 "confidence": "High",
                 "heatmap": None,
                 "debug": debug_info + [f"Raw Gauge Output: {reading}%"],
@@ -232,30 +239,9 @@ class HARPEngine:
             }
 
         # ==========================================
-        # CLOCK LOGIC PIPELINE (Uses C1 Gatekeeper)
+        # CLOCK LOGIC PIPELINE
         # ==========================================
         elif self.mode == 'clock':
-            # --- [C1] LOCALIZATION ---
-            target_crop, found_object, bbox = self._localize_object(img_array)
-            
-            if not found_object:
-                debug_info.append("C1: No Clock Found - Stopping")
-                visualizations['c1_detection'] = self._resize_small(img_array.copy())
-                return {
-                    "time": "N/A", 
-                    "method": "No Clock Detected",
-                    "confidence": "0.0",
-                    "heatmap": None,
-                    "debug": debug_info,
-                    "visualizations": visualizations,
-                    "angles": {"hand1": 0.0, "hand2": 0.0},
-                    "reasoning": "Object is not a clock.",
-                    "error": "No Clock Detected"
-                }
-
-            debug_info.append("C1: Clock Found")
-            visualizations['c1_detection'] = self._draw_bbox(img_array, bbox)
-
             if self.c2_clock_model is None: return {"error": "C2 Clock model missing."}
             results = self.c2_clock_model(target_crop, verbose=False)[0]
             if not results.keypoints or len(results.keypoints.data) == 0:
