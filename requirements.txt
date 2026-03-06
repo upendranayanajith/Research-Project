@@ -6,6 +6,7 @@ opencv-python>=4.8.0
 numpy>=1.24.0
 Pillow>=9.5.0
 grad-cam>=1.4.8
+easyocr>=1.7.0
 
 # Backend (FastAPI)
 fastapi>=0.100.0
