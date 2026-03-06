@@ -119,7 +119,127 @@ def display_results(data):
 
     with tab1:
         st.markdown(f"{icon('crop_free')} **YOLO Localization**", unsafe_allow_html=True)
-        if "c1_detection" in viz: st.image(base64.b64decode(viz["c1_detection"]), width=300)
+
+        # ── Pull C1 quality block from response ──────────────────────────
+        c1q = data.get("c1_quality") or {}
+        det_conf   = c1q.get("confidence")
+        quality    = c1q.get("quality") or {}
+        hough      = c1q.get("hough_validation") or {}
+
+        # ── Row 1: Detection image + confidence + Hough validation ────────
+        col_img, col_stats = st.columns([1, 1])
+
+        with col_img:
+            if "c1_detection" in viz:
+                st.image(base64.b64decode(viz["c1_detection"]), use_container_width=True)
+
+        with col_stats:
+            # --- Detection Confidence ---
+            if det_conf is not None:
+                pct = int(det_conf * 100)
+                if pct >= 80:
+                    color, tier = "#3782eb", "HIGH" 
+                elif pct >= 60:
+                    color, tier = "#39F91FE9", "MEDIUM" 
+                else:
+                    color, tier = "#ef4444", "LOW"
+                st.markdown(
+                    f"""Detection Confidence :
+                    <span style='font-size:1rem; font-weight:700'>{pct}%</span> <br><br>
+                    <span style='font-weight:400'> {tier}</span>
+                    <div style='
+                    background:#e0e0e0; 
+                    border-radius:6px; 
+                    height:8px; 
+                    margin:4px 0 14px
+                    '>
+                      <div style='
+                      background:{color}; 
+                      width:{pct}%; 
+                      height:8px; 
+                      border-radius:6px
+                      '></div>
+                    </div>""",
+                    unsafe_allow_html=True,
+                )
+                # st.markdown(
+                #     f"""<div style='background:#e5e7eb; border-radius:6px; height:8px; margin:4px 0 14px'>
+                #       <div style='background:{color}; width:{pct}%; height:8px; border-radius:6px'></div>
+                #     </div>""",
+                #     unsafe_allow_html=True,
+                # )
+
+            # --- Hough Circle Validation (temporarily disabled) ---
+            # h_ok = hough.get("validated", False)
+            # h_lbl = "PASS" if h_ok else "FAIL"
+            # st.markdown(
+            #     f"Hough Circle Validation : **{h_lbl}**",
+            #     unsafe_allow_html=True,
+            # )
+            # if h_ok:
+            #     bc = hough.get("best_circle", {})
+            #     c_score  = hough.get("center_score", 0)
+            #     cov      = hough.get("coverage_score", 0)
+            #     n_circ   = hough.get("circle_count", 0)
+            #     st.caption(
+            #         f"Circles found: **{n_circ}** | "
+            #         f"Radius: **{bc.get('radius', '?')}px** | "
+            #         f"Centre align: **{c_score:.0f}%** | "
+            #         f"Coverage: **{cov:.0f}%**"
+            #     )
+            # else:
+            #     st.caption("No circular face detected — image may be obscured or angled.")
+
+        # ── Row 2: Hough overlay image (temporarily disabled) ─────────────
+        # if "c1_hough" in viz and viz["c1_hough"]:
+        #     st.markdown(f"Hough Circle Overlay", unsafe_allow_html=True)
+        #     st.image(base64.b64decode(viz["c1_hough"]), caption="Green = detected circle, Red = centre", width=280)
+
+        st.markdown("---")
+
+        # ── Row 3: Image Quality Analysis ─────────────────────────────────
+        if quality:
+            overall = quality.get("overall_quality", 0)
+            if overall >= 75:
+                q_color = "#3782eb"
+            elif overall >= 45:
+                q_color = "#39F91FE9"
+            else:
+                q_color = "#ef4444"
+
+            st.markdown(
+                f"""Image Quality Score : 
+                 <span style='font-weight:500; '><b>{overall:.0f} / 100</b></span>""",
+                unsafe_allow_html=True,
+            )
+
+            # Per-metric bars
+            metrics_info = [
+                ("Sharpness (Blur)",  quality.get("blur_score", 0),       quality.get("blur_raw", 0),       "Laplacian variance",    "blur_on"),
+                ("Brightness",        quality.get("brightness_score", 0), quality.get("brightness_raw", 0), "Mean pixel value",      "wb_sunny"),
+                ("Contrast",          quality.get("contrast_score", 0),   quality.get("contrast_raw", 0),   "Pixel std deviation",   "contrast"),
+            ]
+            cols_m = st.columns(3)
+            for col_m, (label, score, raw, raw_label, icn) in zip(cols_m, metrics_info):
+                if score >= 75:
+                    bar_c = "#3782eb"
+                elif score >= 45:
+                    bar_c = "#39F91FE9"
+                else:
+                    bar_c = "#ef4444"
+                col_m.markdown(
+                    f"**{label}**<br>"
+                    f"<span style='font-size:1.3rem; font-weight:700'>{score:.0f}</span>"
+                    f"<span style='font-size:1rem; color:#334155'>/100</span><br>"
+                    f"<span style='font-size:.9rem; color:#4b5563'>{raw_label}: {raw:.1f}</span>",
+                    unsafe_allow_html=True,
+                )
+                col_m.markdown(
+                    f"""<div style='background:#1e293b; border-radius:6px; height:8px; margin:4px 0'>
+                      <div style='background:{bar_c}; width:{score}%; height:8px; border-radius:6px'></div>
+                    </div>""",
+                    unsafe_allow_html=True,
+                )
     with tab2:
         st.markdown(f"{icon('timeline')} **C2 — Skeleton Structure Analysis**", unsafe_allow_html=True)
         c2e = data.get("c2_enhanced", {})
