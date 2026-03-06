@@ -172,7 +172,6 @@ async def analyze_clock(file: UploadFile = File(...), force_expert: bool = Form(
             "c2_research_visuals": c2_research_visuals,
             "heatmap_b64": None,
             "c1_quality": c1_quality,
-            "processing_time": processing_time
             "processing_time": processing_time,
             "ampm": ampm_res,
             "ambiguity": amb_res,
@@ -246,7 +245,6 @@ async def analyze_clock(file: UploadFile = File(...), force_expert: bool = Form(
         "c2_research_visuals": c2_research_visuals,
         "heatmap_b64": heatmap_b64,
         "c1_quality": c1_quality,
-        "processing_time": processing_time
         "processing_time": processing_time,
         "ampm": ampm_res,
         "ambiguity": amb_res,
