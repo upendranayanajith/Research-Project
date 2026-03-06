@@ -224,6 +224,24 @@ class HARPEngine:
 
         return self._resize_small(img_copy)
 
+    def _draw_gauge_angles(self, img, center, min_pt, max_pt, tip, span, needle):
+        img_copy = img.copy()
+        center_pt = (int(center[0]), int(center[1]))
+        min_p = (int(min_pt[0]), int(min_pt[1]))
+        max_p = (int(max_pt[0]), int(max_pt[1]))
+        tip_p = (int(tip[0]), int(tip[1]))
+
+        # Draw Scale Limits & Needle
+        cv2.line(img_copy, center_pt, min_p, (255, 100, 0), 2)
+        cv2.line(img_copy, center_pt, max_p, (0, 0, 255), 2)
+        cv2.line(img_copy, center_pt, tip_p, (0, 255, 0), 3)
+        cv2.circle(img_copy, center_pt, 6, (255, 255, 255), -1)
+
+        cv2.putText(img_copy, f"Span: {span:.1f} deg", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+        cv2.putText(img_copy, f"Needle: {needle:.1f} deg", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+        return self._resize_small(img_copy)
+
     def analyze(self, img_array, force_expert=False):
         debug_info = []
         visualizations = {}
@@ -313,7 +331,14 @@ class HARPEngine:
                 time_str = f"{reading}%"
                 method_str = "Gauge Reading - Fallback (C1+C2+C4)"
             
+            a_min = self._get_angle(center, min_pt)
+            a_max = self._get_angle(center, max_pt)
+            a_tip = self._get_angle(center, tip)
+            span = (a_max - a_min + 360) % 360
+            needle = (a_tip - a_min + 360) % 360
+
             visualizations['c2_skeleton'] = self._draw_gauge_skeleton(target_crop, center, min_pt, max_pt, tip, parsed_min, parsed_max)
+            visualizations['c3_angles'] = self._draw_gauge_angles(target_crop, center, min_pt, max_pt, tip, span, needle)
             
             return {
                 "time": time_str,
@@ -322,7 +347,7 @@ class HARPEngine:
                 "heatmap": None,
                 "debug": debug_info + [f"Final Reading: {time_str}"],
                 "visualizations": visualizations,
-                "angles": {"hand1": 0.0, "hand2": 0.0}, # Safe placeholder
+                "angles": {"span": span, "needle": needle},
                 "scale": {"min": parsed_min, "max": parsed_max},
                 "reasoning": f"Gauge Logic: Interpreted scale and position.",
                 "error": ""

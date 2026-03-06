@@ -145,8 +145,12 @@ def display_results(data):
             if "c3_angles" in viz: st.image(base64.b64decode(viz["c3_angles"]), caption="Angle Visual", width=300)
         with col_b:
             if "angles" in res and res["angles"]:
-                st.markdown(f"**H:** {res['angles'].get('hand1', 0):.1f}°")
-                st.markdown(f"**M:** {res['angles'].get('hand2', 0):.1f}°")
+                if "span" in res["angles"]:
+                    st.markdown(f"**Total Scale Span:** {res['angles'].get('span', 0):.1f}°")
+                    st.markdown(f"**Needle Pos:** {res['angles'].get('needle', 0):.1f}°")
+                else:
+                    st.markdown(f"**H:** {res['angles'].get('hand1', 0):.1f}°")
+                    st.markdown(f"**M:** {res['angles'].get('hand2', 0):.1f}°")
         if "c3_crops" in viz and viz["c3_crops"]:
             st.markdown("---")
             st.markdown(f"**{icon('image')} ResNet Inputs**", unsafe_allow_html=True)
