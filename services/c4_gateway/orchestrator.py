@@ -46,6 +46,25 @@ def call_c2(cropped_b64: str) -> dict:
         return {"error": f"C2 call failed: {str(e)}"}
 
 
+def call_c2_enhanced(cropped_b64: str) -> dict:
+    """
+    Call C2 Enhanced Skeleton Service — returns research visuals + metrics.
+    Falls back to basic /extract-skeleton if enhanced endpoint is unavailable.
+    """
+    try:
+        img_bytes = base64.b64decode(cropped_b64)
+        resp = requests.post(
+            f"{C2_URL}/extract-skeleton-enhanced",
+            files={"file": ("cropped.jpg", img_bytes, "image/jpeg")},
+            timeout=60   # longer timeout — runs all research algorithms
+        )
+        resp.raise_for_status()
+        return resp.json()
+    except Exception:
+        # Fallback to basic endpoint
+        return call_c2(cropped_b64)
+
+
 def call_c3(cropped_b64: str, keypoints: dict, rough_angles: dict) -> dict:
     """Call C3 Angle Refinement Service."""
     try:

@@ -12,7 +12,7 @@ from typing import List
 
 from services.c4_gateway.physics import physics_solver
 from services.c4_gateway.metrics import metrics_tracker
-from services.c4_gateway.orchestrator import call_c1, call_c2, call_c3, check_services
+from services.c4_gateway.orchestrator import call_c1, call_c2, call_c2_enhanced, call_c3, check_services
 
 app = FastAPI(title="C4 - Clock AI Gateway (Microservice Architecture)")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
@@ -59,15 +59,18 @@ async def analyze_clock(file: UploadFile = File(...), force_expert: bool = Form(
         "hough_validation": c1_result.get("hough_validation"),
     }
 
-    # ========== STEP 2: C2 Skeleton Extraction ==========
-    c2_result = call_c2(cropped_b64)
+    # ========== STEP 2: C2 Skeleton Extraction (Enhanced) ==========
+    c2_result = call_c2_enhanced(cropped_b64)
     if "error" in c2_result:
         return {"result": {"error": c2_result['error']}, "processing_time": time.time() - start_time}
 
     keypoints = c2_result["keypoints"]
     angles = c2_result["angles"]
     visualizations["c2_skeleton"] = c2_result.get("visualization")
-    debug_info.append("C2: Keypoints extracted")
+    # Pass through research data from enhanced endpoint
+    c2_enhanced = c2_result.get("enhanced", {})
+    c2_research_visuals = c2_result.get("research_visuals", {})
+    debug_info.append("C2: Enhanced analysis complete")
 
     # ========== STEP 3: C4 Physics (Fast Path) ==========
     a1 = angles["hand1"]
@@ -75,7 +78,12 @@ async def analyze_clock(file: UploadFile = File(...), force_expert: bool = Form(
     physics_result = physics_solver.solve(a1, a2)
 
     if physics_result["error"] < 8.0 and not force_expert:
-        # Fast Path — skip C3
+        # Enrich result with C2 research
+        c2_conf = c2_enhanced.get("reconstruction_3d", {}).get("confidence", 0.5)
+        c2_occ = c2_enhanced.get("reconstruction_3d", {}).get("occlusion_risk", "UNKNOWN")
+        c2_ha = c2_enhanced.get("reconstruction_3d", {}).get("hand_assignment", {})
+        uncertainty_min = max(1, int((1 - c2_conf) * 10))
+
         result = {
             "time": physics_result["time"],
             "method": "Fast Path (C1+C2+C4)",
@@ -83,7 +91,11 @@ async def analyze_clock(file: UploadFile = File(...), force_expert: bool = Form(
             "heatmap": None,
             "debug": debug_info,
             "angles": {"hand1": a1, "hand2": a2},
-            "reasoning": physics_result["reasoning"]
+            "reasoning": physics_result["reasoning"],
+            "c2_confidence": round(c2_conf, 3),
+            "c2_occlusion_risk": c2_occ,
+            "c2_hand_assignment": c2_ha,
+            "uncertainty": f"±{uncertainty_min} min",
         }
         processing_time = time.time() - start_time
         metrics_tracker.record_analysis(result, processing_time, file.filename)
@@ -91,6 +103,8 @@ async def analyze_clock(file: UploadFile = File(...), force_expert: bool = Form(
         return {
             "result": result,
             "visualizations": visualizations,
+            "c2_enhanced": c2_enhanced,
+            "c2_research_visuals": c2_research_visuals,
             "heatmap_b64": None,
             "c1_quality": c1_quality,
             "processing_time": processing_time
@@ -120,7 +134,11 @@ async def analyze_clock(file: UploadFile = File(...), force_expert: bool = Form(
             "heatmap": None,
             "debug": debug_info,
             "angles": {"hand1": refined["hand1"], "hand2": refined["hand2"]},
-            "reasoning": f"Refined: H={refined['hand1']:.1f}°, M={refined['hand2']:.1f}° → Time={refined_physics['time']}"
+            "reasoning": f"Refined: H={refined['hand1']:.1f}°, M={refined['hand2']:.1f}° → Time={refined_physics['time']}",
+            "c2_confidence": round(c2_enhanced.get("reconstruction_3d", {}).get("confidence", 0.5), 3),
+            "c2_occlusion_risk": c2_enhanced.get("reconstruction_3d", {}).get("occlusion_risk", "UNKNOWN"),
+            "c2_hand_assignment": c2_enhanced.get("reconstruction_3d", {}).get("hand_assignment", {}),
+            "uncertainty": f"±{max(1, int((1 - c2_enhanced.get('reconstruction_3d', {}).get('confidence', 0.5)) * 10))} min",
         }
         heatmap_b64 = c3_result.get("heatmap")
     else:
@@ -143,6 +161,8 @@ async def analyze_clock(file: UploadFile = File(...), force_expert: bool = Form(
     return {
         "result": result,
         "visualizations": visualizations,
+        "c2_enhanced": c2_enhanced,
+        "c2_research_visuals": c2_research_visuals,
         "heatmap_b64": heatmap_b64,
         "c1_quality": c1_quality,
         "processing_time": processing_time
