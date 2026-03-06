@@ -8,14 +8,9 @@ from torchvision import transforms, models
 from ultralytics import YOLO
 from PIL import Image
 from app.core.xai import XaiVisualizer, SemanticExplainer
-<<<<<<< Updated upstream
-from app.core.metrics import calculate_gauge_reading  # Import the new gauge math
-=======
 from app.core.metrics import calculate_gauge_reading, calculate_gauge_reading_advanced
 import easyocr
 import re
->>>>>>> Stashed changes
-
 class HARPEngine:
     def __init__(self, base_dir):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -60,16 +55,9 @@ class HARPEngine:
             print("⚠️ WARNING: C3 weights not found.")
             self.c3_model = None
             self.explainer = None
-<<<<<<< Updated upstream
-
-
-=======
-            
         print("Loading EasyOCR...")
         # Use simple English model, disabled GPU if needed
         self.reader = easyocr.Reader(['en'], gpu=torch.cuda.is_available())
->>>>>>> Stashed changes
-
     def _load_yolo(self, path, name):
         try:
             print(f"Loading {name}: {path}...")
@@ -126,8 +114,6 @@ class HARPEngine:
     def _resize_small(self, img):
         return cv2.resize(img, (300, 300), interpolation=cv2.INTER_LINEAR)
 
-<<<<<<< Updated upstream
-=======
     def _get_roi(self, img, center_pt, patch_size=60):
         h, w = img.shape[:2]
         x, y = int(center_pt[0]), int(center_pt[1])
@@ -164,7 +150,6 @@ class HARPEngine:
             
         return None
 
->>>>>>> Stashed changes
     def _localize_object(self, img):
         # Run both Gatekeeper models
         clock_res = self.c1_clock_model(img, verbose=False)[0] if self.c1_clock_model else None
@@ -302,10 +287,6 @@ class HARPEngine:
             
             center, min_pt, max_pt, tip = kpts[0][:2], kpts[1][:2], kpts[2][:2], kpts[3][:2]
             
-<<<<<<< Updated upstream
-            # C4 Physics Logic 
-            reading = calculate_gauge_reading([center, min_pt, max_pt, tip])
-=======
             # ROI Extraction & OCR
             min_roi = self._get_roi(target_crop, min_pt)
             max_roi = self._get_roi(target_crop, max_pt)
@@ -327,21 +308,10 @@ class HARPEngine:
                 reading = calculate_gauge_reading([center, min_pt, max_pt, tip])
                 time_str = f"{reading}%"
                 method_str = "Gauge Reading - Fallback (C1+C2+C4)"
->>>>>>> Stashed changes
             
             visualizations['c2_skeleton'] = self._draw_gauge_skeleton(target_crop, center, min_pt, max_pt, tip)
             
             return {
-<<<<<<< Updated upstream
-                "time": f"{reading}%", # Re-using the 'time' key so frontend displays it natively
-                "method": "Gauge Reading (C1+C2+C4)",
-                "confidence": "High",
-                "heatmap": None,
-                "debug": debug_info + [f"Raw Gauge Output: {reading}%"],
-                "visualizations": visualizations,
-                "angles": {"hand1": 0.0, "hand2": 0.0}, # Safe placeholder
-                "reasoning": f"Gauge Logic: Needle position maps to {reading}% of scale.",
-=======
                 "time": time_str,
                 "method": method_str,
                 "confidence": "High",
@@ -350,7 +320,6 @@ class HARPEngine:
                 "visualizations": visualizations,
                 "angles": {"hand1": 0.0, "hand2": 0.0}, # Safe placeholder
                 "reasoning": f"Gauge Logic: Interpreted scale and position.",
->>>>>>> Stashed changes
                 "error": ""
             }
 
