@@ -205,7 +205,7 @@ class HARPEngine:
         
         return self._resize_small(img_copy)
 
-    def _draw_gauge_skeleton(self, img, center, min_pt, max_pt, tip):
+    def _draw_gauge_skeleton(self, img, center, min_pt, max_pt, tip, parsed_min="?", parsed_max="?"):
         img_copy = img.copy()
         center_pt = (int(center[0]), int(center[1]))
         min_p = (int(min_pt[0]), int(min_pt[1]))
@@ -217,6 +217,10 @@ class HARPEngine:
         cv2.line(img_copy, center_pt, max_p, (0, 0, 255), 2)   # Red (End)
         cv2.line(img_copy, center_pt, tip_p, (0, 255, 0), 3)   # Green (Needle)
         cv2.circle(img_copy, center_pt, 6, (255, 255, 255), -1)
+        
+        # Draw min/max values
+        cv2.putText(img_copy, f"Min: {parsed_min}", (min_p[0] - 20, min_p[1] + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 100, 0), 2)
+        cv2.putText(img_copy, f"Max: {parsed_max}", (max_p[0] - 20, max_p[1] + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
         return self._resize_small(img_copy)
 
@@ -309,7 +313,7 @@ class HARPEngine:
                 time_str = f"{reading}%"
                 method_str = "Gauge Reading - Fallback (C1+C2+C4)"
             
-            visualizations['c2_skeleton'] = self._draw_gauge_skeleton(target_crop, center, min_pt, max_pt, tip)
+            visualizations['c2_skeleton'] = self._draw_gauge_skeleton(target_crop, center, min_pt, max_pt, tip, parsed_min, parsed_max)
             
             return {
                 "time": time_str,
@@ -319,6 +323,7 @@ class HARPEngine:
                 "debug": debug_info + [f"Final Reading: {time_str}"],
                 "visualizations": visualizations,
                 "angles": {"hand1": 0.0, "hand2": 0.0}, # Safe placeholder
+                "scale": {"min": parsed_min, "max": parsed_max},
                 "reasoning": f"Gauge Logic: Interpreted scale and position.",
                 "error": ""
             }

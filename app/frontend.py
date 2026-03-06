@@ -130,7 +130,14 @@ def display_results(data):
         if "c1_detection" in viz: st.image(base64.b64decode(viz["c1_detection"]), width=300)
     with tab2:
         st.markdown(f"{icon('timeline')} **Keypoints**", unsafe_allow_html=True)
-        if "c2_skeleton" in viz: st.image(base64.b64decode(viz["c2_skeleton"]), width=300)
+        col2a, col2b = st.columns(2)
+        with col2a:
+            if "c2_skeleton" in viz: st.image(base64.b64decode(viz["c2_skeleton"]), width=300)
+        with col2b:
+            if "scale" in res and res["scale"]:
+                st.markdown("### OCR Scale Check")
+                st.info(f"**Min Reading:** {res['scale'].get('min', 'Failed')}")
+                st.error(f"**Max Reading:** {res['scale'].get('max', 'Failed')}")
     with tab3:
         st.markdown(f"{icon('psychology')} **Angle Predictions**", unsafe_allow_html=True)
         col_a, col_b = st.columns(2)
