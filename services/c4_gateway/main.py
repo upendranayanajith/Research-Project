@@ -110,7 +110,13 @@ async def analyze_clock(file: UploadFile = File(...), force_expert: bool = Form(
 
     debug_info.append("C1: Clock Found" if c1_result.get("found") else "C1: Full Scan")
     visualizations["c1_detection"] = c1_result.get("visualization")
+    visualizations["c1_hough"] = c1_result.get("hough_visualization")
     cropped_b64 = c1_result.get("cropped_image")
+    c1_quality = {
+        "confidence": c1_result.get("confidence"),
+        "quality": c1_result.get("quality"),
+        "hough_validation": c1_result.get("hough_validation"),
+    }
 
     # ========== STEP 2: C2 Skeleton Extraction (Enhanced) ==========
     c2_result = call_c2_enhanced(cropped_b64)
@@ -165,6 +171,7 @@ async def analyze_clock(file: UploadFile = File(...), force_expert: bool = Form(
             "c2_enhanced": c2_enhanced,
             "c2_research_visuals": c2_research_visuals,
             "heatmap_b64": None,
+            "c1_quality": c1_quality,
             "processing_time": processing_time,
             "ampm": ampm_res,
             "ambiguity": amb_res,
@@ -237,6 +244,7 @@ async def analyze_clock(file: UploadFile = File(...), force_expert: bool = Form(
         "c2_enhanced": c2_enhanced,
         "c2_research_visuals": c2_research_visuals,
         "heatmap_b64": heatmap_b64,
+        "c1_quality": c1_quality,
         "processing_time": processing_time,
         "ampm": ampm_res,
         "ambiguity": amb_res,
