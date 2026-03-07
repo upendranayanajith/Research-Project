@@ -31,7 +31,9 @@ engine = HARPEngine(BASE_DIR)
 @app.post("/analyze")
 async def analyze_image(
     file: UploadFile = File(...), 
-    force_expert: bool = Form(False)
+    force_expert: bool = Form(False),
+    manual_min_val: str = Form(""),
+    manual_max_val: str = Form("")
 ):
     start_time = time.time()
     
@@ -48,7 +50,12 @@ async def analyze_image(
 
 
     # 2. Call the Engine
-    result = engine.analyze(img, force_expert=force_expert)
+    result = engine.analyze(
+        img, 
+        force_expert=force_expert, 
+        manual_min_val=manual_min_val, 
+        manual_max_val=manual_max_val
+    )
     
     processing_time = time.time() - start_time
     
@@ -99,7 +106,9 @@ async def analyze_image(
 @app.post("/analyze_batch")
 async def analyze_batch(
     files: List[UploadFile] = File(...), 
-    force_expert: bool = Form(False)
+    force_expert: bool = Form(False),
+    manual_min_val: str = Form(""),
+    manual_max_val: str = Form("")
 ):
     results = []
 
@@ -113,7 +122,12 @@ async def analyze_batch(
             if img is None:
                 raise ValueError("Invalid or corrupted image file.")
                 
-            result = engine.analyze(img, force_expert=force_expert)
+            result = engine.analyze(
+                img, 
+                force_expert=force_expert,
+                manual_min_val=manual_min_val, 
+                manual_max_val=manual_max_val
+            )
             processing_time = time.time() - start_time
             
             metrics_tracker.record_analysis(result, processing_time, file.filename)

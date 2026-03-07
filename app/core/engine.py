@@ -9,8 +9,12 @@ from ultralytics import YOLO
 from PIL import Image
 from app.core.xai import XaiVisualizer, SemanticExplainer
 from app.core.metrics import calculate_gauge_reading, calculate_gauge_reading_advanced
-import easyocr
 import re
+import google.generativeai as genai
+import easyocr
+from dotenv import load_dotenv
+
+load_dotenv()
 class HARPEngine:
     def __init__(self, base_dir):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -55,8 +59,8 @@ class HARPEngine:
             print("⚠️ WARNING: C3 weights not found.")
             self.c3_model = None
             self.explainer = None
-        print("Loading EasyOCR...")
-        # Use simple English model, disabled GPU if needed
+        
+        print("Loading EasyOCR Fallback...")
         self.reader = easyocr.Reader(['en'], gpu=torch.cuda.is_available())
     def _load_yolo(self, path, name):
         try:
@@ -114,40 +118,76 @@ class HARPEngine:
     def _resize_small(self, img):
         return cv2.resize(img, (300, 300), interpolation=cv2.INTER_LINEAR)
 
-    def _get_roi(self, img, center_pt, patch_size=60):
-        h, w = img.shape[:2]
-        x, y = int(center_pt[0]), int(center_pt[1])
-        half = patch_size // 2
+    def _extract_gauge_scale_gemini(self, img):
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            return None, None, "Missing GEMINI_API_KEY in .env"
+            
+        genai.configure(api_key=api_key)
+        pil_img = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+        model = genai.GenerativeModel('gemini-1.5-flash')
         
-        y1, y2 = max(0, y - half), min(h, y + half)
-        x1, x2 = max(0, x - half), min(w, x + half)
+        prompt = "Look at this analog gauge. Return ONLY the minimum scale reading and the maximum scale reading printed on it, separated by a comma. Do not include units or any other text. For example: 0, 100 or -10, 50."
+        
+        try:
+            response = model.generate_content([prompt, pil_img])
+            text = response.text.strip()
+            
+            parts = [p.strip() for p in text.split(',')]
+            if len(parts) >= 2:
+                import re
+                min_match = re.findall(r"[-+]?\d*\.\d+|\d+", parts[0])
+                max_match = re.findall(r"[-+]?\d*\.\d+|\d+", parts[1])
+                
+                min_val = float(min_match[0]) if min_match else None
+                max_val = float(max_match[0]) if max_match else None
+                return min_val, max_val, None
+            return None, None, f"Could not parse format: {text}"
+        except Exception as e:
+            return None, None, str(e)
+
+    def _get_roi_inward(self, img, center_pt, target_pt, patch_size=60, shift_pixels=25):
+        """Calculates a vector from target_pt toward center_pt, and shifts the crop box inward."""
+        h, w = img.shape[:2]
+        cx, cy = center_pt[0], center_pt[1]
+        tx, ty = target_pt[0], target_pt[1]
+        
+        # Vector from target toward center
+        dx, dy = cx - tx, cy - ty
+        length = math.hypot(dx, dy)
+        
+        if length > 0:
+            ux, uy = dx/length, dy/length
+            # Shift the center of the crop inward
+            crop_x = int(tx + ux * shift_pixels)
+            crop_y = int(ty + uy * shift_pixels)
+        else:
+            crop_x, crop_y = int(tx), int(ty)
+            
+        half = patch_size // 2
+        y1, y2 = max(0, crop_y - half), min(h, crop_y + half)
+        x1, x2 = max(0, crop_x - half), min(w, crop_x + half)
         
         if x2 - x1 == 0 or y2 - y1 == 0: return None
         return img[y1:y2, x1:x2]
-        
+
     def _extract_number(self, roi_img):
+        """Local EasyOCR extraction on a small image crop."""
         if roi_img is None or roi_img.size == 0: return None
         
-        # Preprocessing for OCR
         gray = cv2.cvtColor(roi_img, cv2.COLOR_BGR2GRAY)
         gray = cv2.resize(gray, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
-        # Apply slight blur to remove noise
         blur = cv2.GaussianBlur(gray, (5, 5), 0)
-        # Adaptive thresholding to handle lighting
         thresh = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
         
         results = self.reader.readtext(thresh)
         if not results: return None
         
-        # Join pieces of text just in case, removing spaces
         full_text = "".join([res[1] for res in results])
-        
-        # Regex to find numbers (integers or decimals)
         matches = re.findall(r"[-+]?\d*\.\d+|\d+", full_text)
         if matches:
             try: return float(matches[0])
             except: return None
-            
         return None
 
     def _localize_object(self, img):
@@ -242,7 +282,7 @@ class HARPEngine:
 
         return self._resize_small(img_copy)
 
-    def analyze(self, img_array, force_expert=False):
+    def analyze(self, img_array, force_expert=False, manual_min_val="", manual_max_val=""):
         debug_info = []
         visualizations = {}
 
@@ -309,17 +349,39 @@ class HARPEngine:
             
             center, min_pt, max_pt, tip = kpts[0][:2], kpts[1][:2], kpts[2][:2], kpts[3][:2]
             
-            # ROI Extraction & OCR
-            min_roi = self._get_roi(target_crop, min_pt)
-            max_roi = self._get_roi(target_crop, max_pt)
+            # --- STAGE 1: MANUAL OVERRIDE ---
+            min_val, max_val = None, None
+            override_active = False
             
-            min_val = self._extract_number(min_roi)
-            max_val = self._extract_number(max_roi)
+            if manual_min_val and manual_max_val:
+                try:
+                    min_val = float(manual_min_val)
+                    max_val = float(manual_max_val)
+                    override_active = True
+                    debug_info.append(f"Stage 1 (Manual Override): Min={min_val}, Max={max_val}")
+                except Exception as e:
+                    debug_info.append(f"Stage 1 (Manual Override) Failed to parse: {e}")
+
+            # --- STAGE 2: GEMINI API ---
+            err_str = None
+            if not override_active:
+                min_val, max_val, err_str = self._extract_gauge_scale_gemini(target_crop)
+                if err_str:
+                    debug_info.append(f"Stage 2 (Gemini API) Failed: {err_str}")
+                elif min_val is not None and max_val is not None:
+                    debug_info.append(f"Stage 2 (Gemini API): Min={min_val}, Max={max_val}")
+            
+            # --- STAGE 3: LOCAL FALLBACK (INWARD SHIFT OCR) ---
+            if not override_active and (min_val is None or max_val is None):
+                debug_info.append("Stage 3 (Local API Fallback): Using Inward-Shift OCR.")
+                min_roi = self._get_roi_inward(target_crop, center, min_pt)
+                max_roi = self._get_roi_inward(target_crop, center, max_pt)
+                min_val = self._extract_number(min_roi)
+                max_val = self._extract_number(max_roi)
+                debug_info.append(f"Stage 3 (Local API Fallback): Min={min_val}, Max={max_val}")
             
             parsed_min = min_val if min_val is not None else "Failed"
             parsed_max = max_val if max_val is not None else "Failed"
-            
-            debug_info.append(f"OCR: Extracted Min={parsed_min}, Max={parsed_max}")
             
             a_min = self._get_angle(center, min_pt)
             a_max = self._get_angle(center, max_pt)
@@ -338,7 +400,7 @@ class HARPEngine:
                 reading = calculate_gauge_reading([center, min_pt, max_pt, tip])
                 time_str = f"{reading}%"
                 method_str = "Gauge Reading - Fallback (C1+C2+C4)"
-                reasoning_str = "Gauge Logic: Interpreted raw percentage."
+                reasoning_str = "Gauge Logic: OCR extraction failed. Interpreted raw percentage. Please use 'Manual Gauge Scale Overrides' in settings."
 
             visualizations['c2_skeleton'] = self._draw_gauge_skeleton(target_crop, center, min_pt, max_pt, tip, parsed_min, parsed_max)
             visualizations['c3_angles'] = self._draw_gauge_angles(target_crop, center, min_pt, max_pt, tip, span, needle)

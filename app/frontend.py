@@ -215,6 +215,11 @@ if st.session_state.page == "analysis":
     st.markdown(f"#### {icon('settings')} Configuration", unsafe_allow_html=True)
     
     force_expert = st.checkbox("Force Expert Path (Activate C3 + XAI)", value=False)
+    
+    st.markdown(f"#### {icon('edit')} Manual Gauge Scale Overrides", unsafe_allow_html=True)
+    colA, colB = st.columns(2)
+    manual_min = colA.text_input("Min Value (Optional)", "")
+    manual_max = colB.text_input("Max Value (Optional)", "")
 
     if uploaded_file and st.button("Run Analysis", type="primary"):
         with st.spinner("Processing..."):
@@ -224,7 +229,9 @@ if st.session_state.page == "analysis":
                 image.save(img_byte_arr, format=image.format)
                 files = {"file": ("image.jpg", img_byte_arr.getvalue(), "image/jpeg")}
                 data_form = {
-                    "force_expert": str(force_expert)
+                    "force_expert": str(force_expert),
+                    "manual_min_val": manual_min if manual_min.strip() else "",
+                    "manual_max_val": manual_max if manual_max.strip() else ""
                 }
                 response = requests.post(f"{API_URL}/analyze", files=files, data=data_form)
                 if response.status_code == 200: display_results(response.json())
@@ -268,7 +275,11 @@ elif st.session_state.page == "batch":
     uploaded_files = st.file_uploader("Upload Images", accept_multiple_files=True)
     if uploaded_files and st.button("Process All"):
         files = [("files", (f.name, f.getvalue(), f.type)) for f in uploaded_files]
-        data_form = {"force_expert": "False"}
+        data_form = {
+            "force_expert": "False",
+            "manual_min_val": "",
+            "manual_max_val": ""
+        }
         with st.spinner("Processing Batch..."):
             try:
                 res = requests.post(f"{API_URL}/analyze_batch", files=files, data=data_form)
