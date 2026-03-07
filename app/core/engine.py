@@ -190,6 +190,37 @@ class HARPEngine:
             except: return None
         return None
 
+    def _enhance_image(self, img):
+        """CLAHE contrast enhancement + unsharp masking sharpening."""
+        lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(lab)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        l = clahe.apply(l)
+        enhanced = cv2.merge((l, a, b))
+        enhanced = cv2.cvtColor(enhanced, cv2.COLOR_LAB2BGR)
+        gaussian = cv2.GaussianBlur(enhanced, (0, 0), 2.0)
+        sharpened = cv2.addWeighted(enhanced, 1.5, gaussian, -0.5, 0)
+        return sharpened
+
+    def _deskew_clock(self, crop):
+        """Detect tilt angle via contour fitting and rotate crop to upright."""
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return crop
+        largest = max(contours, key=cv2.contourArea)
+        rect = cv2.minAreaRect(largest)
+        angle = rect[2]
+        if angle < -45:
+            angle = 90 + angle
+        if abs(angle) < 2.0:
+            return crop
+        h, w = crop.shape[:2]
+        M = cv2.getRotationMatrix2D((w // 2, h // 2), angle, 1.0)
+        rotated = cv2.warpAffine(crop, M, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+        return rotated
+
     def _localize_object(self, img):
         # Run both Gatekeeper models
         clock_res = self.c1_clock_model(img, verbose=False)[0] if self.c1_clock_model else None
@@ -216,7 +247,13 @@ class HARPEngine:
         pad = 30
         x1, y1 = max(0, x1 - pad), max(0, y1 - pad)
         x2, y2 = min(w, x2 + pad), min(h, y2 + pad)
-        return img[y1:y2, x1:x2], True, (x1, y1, x2, y2), detected_type
+        
+        crop = img[y1:y2, x1:x2]
+        if detected_type == 'clock':
+            crop = self._deskew_clock(crop)
+            crop = self._enhance_image(crop)
+            
+        return crop, True, (x1, y1, x2, y2), detected_type
 
     def _draw_bbox(self, img, bbox, detected_type):
         img_copy = img.copy()
@@ -292,6 +329,7 @@ class HARPEngine:
         if not found_object:
             debug_info.append(f"C1: No Object Found - Stopping")
             visualizations['c1_detection'] = self._resize_small(img_array.copy())
+
             return {
                 "time": "N/A", 
                 "method": f"No Object Detected",
@@ -445,7 +483,7 @@ class HARPEngine:
             
             h, m, error = self._solve_physics(a1, a2)
             
-            if error < 20.0 and not force_expert:
+            if error < 8.0 and not force_expert:
                 return {
                     "time": f"{h}:{m:02d}",
                     "method": "Fast Path (C1+C2+C4)",
