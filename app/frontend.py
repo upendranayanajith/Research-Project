@@ -517,35 +517,6 @@ if st.session_state.page == "analysis":
                 if response.status_code == 200: display_results(response.json())
                 else: st.error(f"Server Error: {response.status_code}")
             except Exception as e: st.error(f"Connection Failed: {e}")
-    if uploaded_file and st.button("Run Analysis", type="primary"):
-        with st.spinner("Processing..."):
-            try:
-                image        = Image.open(uploaded_file)
-                img_byte_arr = io.BytesIO()
-                image.save(img_byte_arr, format=image.format)
-<<<<<<< HEAD
-                files = {"file": ("image.jpg", img_byte_arr.getvalue(), "image/jpeg")}
-                data_form = {
-                    "force_expert": str(force_expert),
-                    "gauge_template": gauge_template,
-                    "manual_min_val": manual_min if manual_min.strip() else "",
-                    "manual_max_val": manual_max if manual_max.strip() else ""
-                }
-                response = requests.post(f"{API_URL}/analyze", files=files, data=data_form)
-                if response.status_code == 200: display_results(response.json())
-                else: st.error(f"Server Error: {response.status_code}")
-            except Exception as e: st.error(f"Connection Failed: {e}")
-=======
-                files     = {"file": ("image.jpg", img_byte_arr.getvalue(), "image/jpeg")}
-                data_form = {"force_expert": str(force_expert)}
-                response  = requests.post(f"{API_URL}/analyze", files=files, data=data_form)
-                if response.status_code == 200:
-                    display_results(response.json())
-                else:
-                    st.error(f"Server Error: {response.status_code}")
-            except Exception as e:
-                st.error(f"Connection Failed: {e}")
->>>>>>> origin/new_begin_try_again
 
 elif st.session_state.page == "webcam":
     st.markdown(f"## {icon('videocam')} Real-Time Analysis", unsafe_allow_html=True)
