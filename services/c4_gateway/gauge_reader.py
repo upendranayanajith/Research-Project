@@ -14,7 +14,7 @@ import logging
 from dataclasses import dataclass
 from typing import Optional
 
-from gauge_config import GaugeConfig, get_gauge_config
+from .gauge_config import GaugeConfig, get_gauge_config
 
 logger = logging.getLogger(__name__)
 

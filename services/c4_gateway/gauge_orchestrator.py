@@ -32,8 +32,8 @@ import logging
 from typing import Optional
 
 from .gauge_config import GaugeConfig, get_gauge_config, register_custom_gauge
-from gauge_reader import GaugeReader, GaugeReading
-from gauge_type_detector import detect_gauge_type
+from .gauge_reader import GaugeReader, GaugeReading
+from .gauge_type_detector import detect_gauge_type
 
 logger = logging.getLogger(__name__)
 
