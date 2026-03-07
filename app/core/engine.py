@@ -282,7 +282,7 @@ class HARPEngine:
 
         return self._resize_small(img_copy)
 
-    def analyze(self, img_array, force_expert=False, manual_min_val="", manual_max_val=""):
+    def analyze(self, img_array, force_expert=False, gauge_template="Auto-Detect (AI OCR)", manual_min_val="", manual_max_val=""):
         debug_info = []
         visualizations = {}
 
@@ -362,18 +362,30 @@ class HARPEngine:
                 except Exception as e:
                     debug_info.append(f"Stage 1 (Manual Override) Failed to parse: {e}")
 
-            # --- STAGE 2: GEMINI API ---
+            # --- STAGE 1.5: GAUGE TEMPLATE ---
+            if not override_active and gauge_template and gauge_template != "Auto-Detect (AI OCR)":
+                try:
+                    parts = gauge_template.split(" to ")
+                    if len(parts) == 2:
+                        min_val = float(parts[0])
+                        max_val = float(parts[1])
+                        override_active = True
+                        debug_info.append(f"Stage 2 (Template Override): Min={min_val}, Max={max_val} (Template: {gauge_template})")
+                except Exception as e:
+                    debug_info.append(f"Stage 2 (Template Override) Failed to parse: {e}")
+
+            # --- STAGE 3: GEMINI API ---
             err_str = None
             if not override_active:
                 min_val, max_val, err_str = self._extract_gauge_scale_gemini(target_crop)
                 if err_str:
-                    debug_info.append(f"Stage 2 (Gemini API) Failed: {err_str}")
+                    debug_info.append(f"Stage 3 (Gemini API) Failed: {err_str}")
                 elif min_val is not None and max_val is not None:
-                    debug_info.append(f"Stage 2 (Gemini API): Min={min_val}, Max={max_val}")
+                    debug_info.append(f"Stage 3 (Gemini API): Min={min_val}, Max={max_val}")
             
-            # --- STAGE 3: LOCAL FALLBACK (INWARD SHIFT OCR) ---
+            # --- STAGE 4: LOCAL FALLBACK (INWARD SHIFT OCR) ---
             if not override_active and (min_val is None or max_val is None):
-                debug_info.append("Stage 3 (Local API Fallback): Using Inward-Shift OCR.")
+                debug_info.append("Stage 4 (Local API Fallback): Using Inward-Shift OCR.")
                 min_roi = self._get_roi_inward(target_crop, center, min_pt)
                 max_roi = self._get_roi_inward(target_crop, center, max_pt)
                 min_val = self._extract_number(min_roi)

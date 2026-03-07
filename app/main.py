@@ -32,6 +32,7 @@ engine = HARPEngine(BASE_DIR)
 async def analyze_image(
     file: UploadFile = File(...), 
     force_expert: bool = Form(False),
+    gauge_template: str = Form("Auto-Detect (AI OCR)"),
     manual_min_val: str = Form(""),
     manual_max_val: str = Form("")
 ):
@@ -53,6 +54,7 @@ async def analyze_image(
     result = engine.analyze(
         img, 
         force_expert=force_expert, 
+        gauge_template=gauge_template,
         manual_min_val=manual_min_val, 
         manual_max_val=manual_max_val
     )
@@ -107,6 +109,7 @@ async def analyze_image(
 async def analyze_batch(
     files: List[UploadFile] = File(...), 
     force_expert: bool = Form(False),
+    gauge_template: str = Form("Auto-Detect (AI OCR)"),
     manual_min_val: str = Form(""),
     manual_max_val: str = Form("")
 ):
@@ -125,6 +128,7 @@ async def analyze_batch(
             result = engine.analyze(
                 img, 
                 force_expert=force_expert,
+                gauge_template=gauge_template,
                 manual_min_val=manual_min_val, 
                 manual_max_val=manual_max_val
             )

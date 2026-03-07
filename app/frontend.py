@@ -216,6 +216,14 @@ if st.session_state.page == "analysis":
     
     force_expert = st.checkbox("Force Expert Path (Activate C3 + XAI)", value=False)
     
+    st.markdown(f"#### {icon('speed')} Pre-Defined Gauge Templates", unsafe_allow_html=True)
+    gauge_template = st.selectbox(
+        "Select Scale Template",
+        ["Auto-Detect (AI OCR)", "0 to 30", "0 to 50", "0 to 100", "0 to 160", "-10 to 50"],
+        index=0,
+        help="If you know the gauge scale, select it here to bypass OCR extraction for 100% accuracy."
+    )
+    
     st.markdown(f"#### {icon('edit')} Manual Gauge Scale Overrides", unsafe_allow_html=True)
     colA, colB = st.columns(2)
     manual_min = colA.text_input("Min Value (Optional)", "")
@@ -230,6 +238,7 @@ if st.session_state.page == "analysis":
                 files = {"file": ("image.jpg", img_byte_arr.getvalue(), "image/jpeg")}
                 data_form = {
                     "force_expert": str(force_expert),
+                    "gauge_template": gauge_template,
                     "manual_min_val": manual_min if manual_min.strip() else "",
                     "manual_max_val": manual_max if manual_max.strip() else ""
                 }
@@ -277,6 +286,7 @@ elif st.session_state.page == "batch":
         files = [("files", (f.name, f.getvalue(), f.type)) for f in uploaded_files]
         data_form = {
             "force_expert": "False",
+            "gauge_template": "Auto-Detect (AI OCR)",
             "manual_min_val": "",
             "manual_max_val": ""
         }
