@@ -49,21 +49,20 @@ def calculate_gauge_reading(keypoints: List[tuple]) -> float:
     percentage = (rot_tip / rot_max) * 100
     return round(percentage, 1)
 
-def calculate_gauge_reading_advanced(keypoints: List[tuple], min_val: float, max_val: float) -> float:
+def calculate_gauge_reading_advanced(span: float, needle: float, min_val: float, max_val: float) -> tuple:
     """
-    [C4] Calculates actual physical reading from gauge percentage and scale extremes.
+    [C4] Calculates actual physical reading from gauge span/needle and scale extremes.
+    Returns (reading, units_per_degree).
     """
-    if min_val is None or max_val is None:
-        # Fallback to percentage if OCR failed
-        return calculate_gauge_reading(keypoints)
+    if span <= 0 or min_val is None or max_val is None:
+        return 0.0, 0.0
         
-    percentage_str = calculate_gauge_reading(keypoints)
     try:
-        percentage_float = float(percentage_str) / 100.0
-        reading = min_val + (percentage_float * (max_val - min_val))
-        return round(reading, 2)
+        units_per_degree = (max_val - min_val) / span
+        reading = min_val + (needle * units_per_degree)
+        return round(reading, 2), round(units_per_degree, 4)
     except:
-        return 0.0
+        return 0.0, 0.0
 
 
 # --- [C4] METRICS TRACKER CLASS (Member 4) ---

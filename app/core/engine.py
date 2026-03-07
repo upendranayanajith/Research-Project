@@ -321,21 +321,24 @@ class HARPEngine:
             
             debug_info.append(f"OCR: Extracted Min={parsed_min}, Max={parsed_max}")
             
-            # C4 Physics Logic 
-            if min_val is not None and max_val is not None and min_val <= max_val:
-                reading = calculate_gauge_reading_advanced([center, min_pt, max_pt, tip], min_val, max_val)
-                time_str = str(reading)
-                method_str = "Advanced Gauge Reading (C1+C2+OCR+C4)"
-            else:
-                reading = calculate_gauge_reading([center, min_pt, max_pt, tip])
-                time_str = f"{reading}%"
-                method_str = "Gauge Reading - Fallback (C1+C2+C4)"
-            
             a_min = self._get_angle(center, min_pt)
             a_max = self._get_angle(center, max_pt)
             a_tip = self._get_angle(center, tip)
             span = (a_max - a_min + 360) % 360
             needle = (a_tip - a_min + 360) % 360
+            
+            units_per_deg = 0.0
+            # C4 Physics Logic 
+            if min_val is not None and max_val is not None and min_val <= max_val:
+                reading, units_per_deg = calculate_gauge_reading_advanced(span, needle, min_val, max_val)
+                time_str = str(reading)
+                method_str = "Advanced Gauge Reading (C1+C2+OCR+C4)"
+                reasoning_str = f"Gauge Logic: 1° = {units_per_deg:.4f} units. Formula: {min_val} + ({needle:.1f}° * {units_per_deg:.4f}) = {reading}"
+            else:
+                reading = calculate_gauge_reading([center, min_pt, max_pt, tip])
+                time_str = f"{reading}%"
+                method_str = "Gauge Reading - Fallback (C1+C2+C4)"
+                reasoning_str = "Gauge Logic: Interpreted raw percentage."
 
             visualizations['c2_skeleton'] = self._draw_gauge_skeleton(target_crop, center, min_pt, max_pt, tip, parsed_min, parsed_max)
             visualizations['c3_angles'] = self._draw_gauge_angles(target_crop, center, min_pt, max_pt, tip, span, needle)
@@ -347,9 +350,9 @@ class HARPEngine:
                 "heatmap": None,
                 "debug": debug_info + [f"Final Reading: {time_str}"],
                 "visualizations": visualizations,
-                "angles": {"span": span, "needle": needle},
+                "angles": {"span": span, "needle": needle, "units_per_deg": units_per_deg},
                 "scale": {"min": parsed_min, "max": parsed_max},
-                "reasoning": f"Gauge Logic: Interpreted scale and position.",
+                "reasoning": reasoning_str,
                 "error": ""
             }
 

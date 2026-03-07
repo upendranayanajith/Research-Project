@@ -148,6 +148,9 @@ def display_results(data):
                 if "span" in res["angles"]:
                     st.markdown(f"**Total Scale Span:** {res['angles'].get('span', 0):.1f}°")
                     st.markdown(f"**Needle Pos:** {res['angles'].get('needle', 0):.1f}°")
+                    upd = res['angles'].get('units_per_deg', 0.0)
+                    if upd > 0:
+                        st.markdown(f"**1° Angle =** {upd:.4f} scale units")
                 else:
                     st.markdown(f"**H:** {res['angles'].get('hand1', 0):.1f}°")
                     st.markdown(f"**M:** {res['angles'].get('hand2', 0):.1f}°")
