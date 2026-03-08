@@ -113,16 +113,29 @@ class HARPEngine:
 
     def _infer_ampm(self, crop):
         if crop is None or crop.size == 0: return "Unknown", 0.0
-        hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
-        brightness = np.mean(hsv[:, :, 2])
-        b, g, r = cv2.split(crop)
-        mean_b = np.mean(b)
-        mean_r = np.mean(r)
         
-        # Simple heuristic: higher brightness and more blue relative to red = daylight
-        is_day = brightness > 100 and (mean_b / (mean_r + 1e-5)) > 0.9
-        confidence = min(1.0, abs(brightness - 100) / 100.0)
-        return "AM" if is_day else "PM", confidence
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            return "Unknown (Missing API Key)", 0.0
+            
+        try:
+            genai.configure(api_key=api_key)
+            pil_img = Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
+            model = genai.GenerativeModel('gemini-2.5-flash')
+            
+            prompt = "Look at this cropped image of a clock. Based on the lighting, shadows, colors, and overall ambiance, guess whether this photo was taken during the day (AM) or night (PM). Return ONLY 'AM' or 'PM'."
+            
+            response = model.generate_content([prompt, pil_img])
+            text = response.text.strip().upper()
+            
+            if "AM" in text:
+                return "AM", 0.9
+            elif "PM" in text:
+                return "PM", 0.9
+            else:
+                return "Unknown", 0.5
+        except Exception as e:
+            return "Unknown", 0.0
 
     def _resolve_ambiguity(self, a1, a2, h, m):
         diff = min((a1 - a2) % 360, (a2 - a1) % 360)
@@ -167,7 +180,7 @@ class HARPEngine:
             
         genai.configure(api_key=api_key)
         pil_img = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel('gemini-2.5-flash')
         
         prompt = "Look at this analog gauge. Return ONLY the minimum scale reading and the maximum scale reading printed on it, separated by a comma. Do not include units or any other text. For example: 0, 100 or -10, 50."
         
@@ -487,7 +500,7 @@ class HARPEngine:
             
             h, m, error = self._solve_physics(a1, a2)
             
-            ampm_status, ampm_conf = self._infer_ampm(target_crop)
+            ampm_status, ampm_conf = self._infer_ampm(img_array)
             ambiguity_warning = self._resolve_ambiguity(a1, a2, h, m)
             drift_str = self._calculate_drift(h, m, device_time_str)
             

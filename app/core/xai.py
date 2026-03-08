@@ -42,7 +42,7 @@ class SemanticExplainer:
         if self.api_key:
             try:
                 genai.configure(api_key=self.api_key)
-                self.model = genai.GenerativeModel('gemini-1.5-flash')
+                self.model = genai.GenerativeModel('gemini-2.5-flash')
                 self.available = True
             except Exception as e:
                 print(f"AI Init Failed: {e}")
