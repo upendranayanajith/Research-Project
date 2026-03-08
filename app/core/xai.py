@@ -195,3 +195,337 @@ class SemanticExplainer:
 
         # --- Local fallback (always available, no API required) ---
         return self.local_explainer.explain(raw_heatmap, predicted_angle, hand_type)
+
+
+# ===========================================================================
+# TIER 2 ADDITIONS
+# ===========================================================================
+
+def compute_entropy(heatmap: np.ndarray) -> float:
+    """
+    [6.9] Compute normalised Shannon entropy of a GradCAM++ heatmap.
+
+    A near-zero value means the model is focused (confident).
+    A value close to 1.0 means activations are diffuse (confused model).
+
+    Args:
+        heatmap: float32 array [0,1] of shape (H, W).
+
+    Returns:
+        Normalised entropy in [0, 1].
+    """
+    if heatmap is None or heatmap.size == 0:
+        return 1.0   # Treat missing heatmap as maximally uncertain
+
+    flat = heatmap.flatten().astype(np.float64) + 1e-9
+    flat /= flat.sum()
+    entropy     = -np.sum(flat * np.log(flat))
+    max_entropy = np.log(flat.size)
+    return float(entropy / max_entropy)
+
+
+class AdaptiveSemanticRouter:
+    """
+    [6.9] Adaptive XAI Routing — automatically escalates to Gemini when the
+    GradCAM++ heatmap entropy exceeds a threshold (model is confused).
+
+    Usage:
+        router = AdaptiveSemanticRouter(explainer)
+        explanation = router.explain(raw_heatmap, crop_img, heatmap_img, angle, hand_type)
+    """
+
+    ENTROPY_THRESHOLD = 0.72   # ≥ this → call Gemini (configurable)
+
+    def __init__(self, semantic_explainer: "SemanticExplainer"):
+        self.explainer = semantic_explainer
+
+    def explain(
+        self,
+        raw_heatmap: np.ndarray,
+        crop_img,
+        heatmap_img,
+        predicted_angle: float,
+        hand_type: str = "Hour",
+    ) -> tuple:
+        """
+        Returns (explanation_str, routing_reason_str).
+        Routing reason is for debug_info logging.
+        """
+        entropy = compute_entropy(raw_heatmap)
+
+        if entropy >= self.ENTROPY_THRESHOLD and self.explainer.available:
+            explanation = self.explainer.explain(
+                crop_img, heatmap_img, predicted_angle,
+                hand_type=hand_type, raw_heatmap=raw_heatmap,
+                use_gemini=True,
+            )
+            reason = f"XAI Routing: Gemini escalated (entropy={entropy:.3f} ≥ {self.ENTROPY_THRESHOLD})"
+        else:
+            explanation = self.explainer.explain(
+                crop_img, heatmap_img, predicted_angle,
+                hand_type=hand_type, raw_heatmap=raw_heatmap,
+                use_gemini=False,
+            )
+            reason = f"XAI Routing: LocalExplainer (entropy={entropy:.3f} < {self.ENTROPY_THRESHOLD})"
+
+        return explanation, reason, entropy
+
+
+class ContrastiveExplainer:
+    """
+    [6.6] Contrastive XAI — "Why not X:XX?"
+
+    Given the predicted time and top-N alternative candidates from the C4
+    physics solver, and the GradCAM++ heatmap, generates a counterfactual
+    explanation: e.g. "Read 3:15 instead of 9:15 because the hour hand
+    focus was on the right side (expected left for 9:xx)."
+    """
+
+    # Maps coarse angle range to clock-face side label
+    _ANGLE_TO_SIDE = [
+        (315, 360, "top"),
+        (0,   45,  "top"),
+        (45,  135, "right"),
+        (135, 225, "bottom"),
+        (225, 315, "left"),
+    ]
+
+    @staticmethod
+    def _angle_to_side(angle_deg: float) -> str:
+        a = angle_deg % 360
+        for lo, hi, label in ContrastiveExplainer._ANGLE_TO_SIDE:
+            if lo <= a < hi:
+                return label
+        return "top"
+
+    @staticmethod
+    def _heatmap_to_side(heatmap: np.ndarray) -> str:
+        """Identify which side the heatmap centroid falls on."""
+        if heatmap is None or heatmap.size == 0:
+            return "unknown"
+        h, w = heatmap.shape[:2]
+        flat = heatmap.flatten().astype(np.float64) + 1e-9
+        flat /= flat.sum()
+        ys, xs = np.mgrid[0:h, 0:w]
+        cy = float(np.sum(flat.reshape(h, w) * ys))  # centroid y
+        cx = float(np.sum(flat.reshape(h, w) * xs))  # centroid x
+        # Map centroid to quadrant name
+        if cy < h * 0.35:
+            return "top"
+        elif cy > h * 0.65:
+            return "bottom"
+        elif cx < w * 0.4:
+            return "left"
+        else:
+            return "right"
+
+    def explain(
+        self,
+        raw_heatmap: np.ndarray,
+        predicted_h: int,
+        predicted_m: int,
+        candidates: list,         # [(h, m, error), ...]
+        hand1_angle: float = None,
+    ) -> str:
+        """
+        Args:
+            raw_heatmap:  Fused GradCAM++ map [0,1] (H, W).
+            predicted_h:  Predicted hour.
+            predicted_m:  Predicted minute.
+            candidates:   Top-N alternative (h, m, error) tuples.
+            hand1_angle:  Rough hour-hand angle (from C2/C3) for reference.
+
+        Returns:
+            Human-readable contrastive explanation string.
+        """
+        actual_focus = self._heatmap_to_side(raw_heatmap)
+        lines = [
+            f"[Contrastive XAI] The model predicted **{predicted_h}:{predicted_m:02d}**. "
+            f"The GradCAM++ focus was on the **{actual_focus}** side of the crop.",
+        ]
+
+        for h, m, err in candidates[:3]:
+            if h == predicted_h and m == predicted_m:
+                continue   # Skip the predicted time itself
+            # Expected heatmap side for this candidate's hour angle
+            expected_h_angle = (h % 12) * 30 + m * 0.5
+            expected_side = self._angle_to_side(expected_h_angle)
+            verdict = (
+                "consistent ✅" if expected_side == actual_focus
+                else f"inconsistent ❌ (expected focus: {expected_side})"
+            )
+            lines.append(
+                f"  • Instead **{h}:{m:02d}** (err={err:.1f}°)? "
+                f"Hour hand should face {expected_side} — {verdict}"
+            )
+
+        if len(lines) == 1:
+            lines.append("  No significant alternative candidates found.")
+
+        return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# LIME Explainer
+# ---------------------------------------------------------------------------
+class LimeExplainer:
+    """
+    [6.10] LIME — superpixel-based perturbation explainer.
+    Shows which image regions most influenced the C3 prediction.
+
+    Produces an overlay image comparable with GradCAM++ output.
+    Uses lime.lime_image.LimeImageExplainer with 300 perturbation samples.
+    """
+
+    N_SAMPLES        = 300   # Perturbation samples (speed vs. accuracy)
+    N_FEATURES       = 5     # Superpixels to highlight
+    BATCH_SIZE       = 32
+
+    def __init__(self):
+        try:
+            from lime.lime_image import LimeImageExplainer
+            self.explainer = LimeImageExplainer()
+            self.available = True
+        except ImportError:
+            self.available = False
+            print("⚠️ LIME not installed. Run: pip install lime")
+
+    def explain(self, model, input_tensor: "torch.Tensor", norm_crop: np.ndarray) -> np.ndarray:
+        """
+        Args:
+            model:         The full C3 nn.Sequential (ResNet18 + Sigmoid).
+            input_tensor:  (1, 3, 64, 64) torch tensor.
+            norm_crop:     (64, 64, 3) float32 [0,1] — the original image for display.
+
+        Returns:
+            overlay (np.ndarray uint8 HxWx3): coloured LIME superpixel overlay.
+            Returns None if LIME is unavailable or fails.
+        """
+        if not self.available:
+            return None
+
+        try:
+            import torch
+            from skimage.color import gray2rgb
+
+            # LIME needs a predict_fn that takes a batch of uint8 (H,W,3) images
+            mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+            std  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+            device = next(model.parameters()).device
+
+            def predict_fn(batch_uint8):
+                imgs = batch_uint8.astype(np.float32) / 255.0           # (N,H,W,C)
+                imgs = (imgs - mean) / std                               # normalise
+                t    = torch.tensor(imgs.transpose(0,3,1,2), dtype=torch.float32).to(device)
+                with torch.no_grad():
+                    out = model(t).cpu().numpy()                          # (N,1)
+                return np.hstack([out, 1.0 - out])                       # fake 2-class
+
+            # Original image in uint8 RGB
+            img_uint8 = (norm_crop * 255).astype(np.uint8)
+
+            explanation = self.explainer.explain_instance(
+                img_uint8,
+                predict_fn,
+                top_labels=1,
+                hide_color=0,
+                num_samples=self.N_SAMPLES,
+                batch_size=self.BATCH_SIZE,
+            )
+
+            # Get image + mask for the top label
+            label = explanation.top_labels[0]
+            temp, mask = explanation.get_image_and_mask(
+                label,
+                positive_only=True,
+                num_features=self.N_FEATURES,
+                hide_rest=False,
+            )
+
+            # Colour the highlighted superpixels green
+            overlay = img_uint8.copy()
+            overlay[mask == 1] = np.clip(
+                overlay[mask == 1] * np.array([0.3, 1.0, 0.3], dtype=np.float32), 0, 255
+            ).astype(np.uint8)
+
+            return overlay
+
+        except Exception as e:
+            print(f"⚠️ LIME explain failed: {e}")
+            return None
+
+
+# ---------------------------------------------------------------------------
+# SHAP Explainer
+# ---------------------------------------------------------------------------
+class ShapExplainer:
+    """
+    [6.10] SHAP DeepExplainer — pixel-attribution XAI.
+    Uses Shapley values to assign credit/blame to each pixel patch.
+
+    Produces a signed heatmap (positive = increases predicted angle,
+    negative = decreases predicted angle) rendered as a coloured overlay.
+    """
+
+    N_BACKGROUND = 20   # Background samples for DeepExplainer
+
+    def __init__(self):
+        try:
+            import shap as _shap
+            self.shap = _shap
+            self.available = True
+        except ImportError:
+            self.available = False
+            print("⚠️ SHAP not installed. Run: pip install shap")
+
+    def explain(self, model, input_tensor: "torch.Tensor", background: "torch.Tensor") -> np.ndarray:
+        """
+        Args:
+            model:          Full C3 nn.Sequential.
+            input_tensor:   (1, 3, 64, 64) input torch tensor.
+            background:     (N, 3, 64, 64) background tensor (random noise or training samples).
+                            If None, a zero background is used.
+
+        Returns:
+            overlay (np.ndarray uint8 HxWx3): SHAP attribution heatmap overlay.
+            Returns None if SHAP unavailable or fails.
+        """
+        if not self.available:
+            return None
+
+        try:
+            import torch
+            device = next(model.parameters()).device
+
+            if background is None:
+                background = torch.zeros(
+                    self.N_BACKGROUND, *input_tensor.shape[1:], device=device
+                )
+
+            # DeepExplainer operates on the raw ResNet18 (before Sigmoid)
+            resnet = model[0] if hasattr(model, '__getitem__') else model
+            resnet.eval()
+
+            explainer = self.shap.DeepExplainer(resnet, background)
+            shap_vals  = explainer.shap_values(input_tensor)   # (1, 3, 64, 64) or list
+
+            # Sum absolute SHAP values across colour channels → (64, 64)
+            if isinstance(shap_vals, list):
+                shap_map = np.abs(shap_vals[0]).sum(axis=1)[0]    # (H,W)
+            else:
+                shap_map = np.abs(shap_vals).sum(axis=1)[0]       # (H,W)
+
+            # Normalise to [0, 1]
+            s_min, s_max = shap_map.min(), shap_map.max()
+            if s_max > s_min:
+                shap_map = (shap_map - s_min) / (s_max - s_min)
+
+            # Apply a red-blue colourmap (blue = low, red = high attribution)
+            shap_uint8 = (shap_map * 255).astype(np.uint8)
+            coloured   = cv2.applyColorMap(shap_uint8, cv2.COLORMAP_JET)
+            coloured_rgb = cv2.cvtColor(coloured, cv2.COLOR_BGR2RGB)
+            return coloured_rgb
+
+        except Exception as e:
+            print(f"⚠️ SHAP explain failed: {e}")
+            return None

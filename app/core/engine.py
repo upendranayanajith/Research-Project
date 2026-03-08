@@ -7,7 +7,11 @@ import torch.nn as nn
 from torchvision import transforms, models
 from ultralytics import YOLO
 from PIL import Image
-from app.core.xai import XaiVisualizer, SemanticExplainer
+from app.core.xai import (
+    XaiVisualizer, SemanticExplainer,
+    AdaptiveSemanticRouter, ContrastiveExplainer,
+    LimeExplainer, ShapExplainer,
+)
 from app.core.metrics import calculate_gauge_reading, calculate_gauge_reading_advanced
 from app.core.temporal import TemporalTracker   # [Tier 1.4] Temporal Consistency
 import google.generativeai as genai
@@ -54,13 +58,26 @@ class HARPEngine:
         if os.path.exists(self.c3_path):
             self.c3_model.load_state_dict(torch.load(self.c3_path, map_location=self.device))
             self.c3_model.eval()
-            self.xai = XaiVisualizer(self.c3_model[0])
+            self.xai       = XaiVisualizer(self.c3_model[0])
             self.explainer = SemanticExplainer()
+            # --- [Tier 2] XAI Extensions ---
+            self.adaptive_router       = AdaptiveSemanticRouter(self.explainer)   # [6.9]
+            self.contrastive_explainer = ContrastiveExplainer()                   # [6.6]
+            self.lime_explainer        = LimeExplainer()                          # [6.10]
+            self.shap_explainer        = ShapExplainer()                          # [6.10]
             print("✅ C3 + XAI (GradCAM++) Loaded.")
+            print(f"  Adaptive Routing: entropy threshold = {AdaptiveSemanticRouter.ENTROPY_THRESHOLD}")
+            print(f"  LIME: {'available' if self.lime_explainer.available else 'not installed'}")
+            print(f"  SHAP: {'available' if self.shap_explainer.available else 'not installed'}")
         else:
             print("⚠️ WARNING: C3 weights not found.")
             self.c3_model = None
             self.explainer = None
+            self.xai       = None
+            self.adaptive_router     = None
+            self.contrastive_explainer = None
+            self.lime_explainer      = None
+            self.shap_explainer      = None
         
         print("Loading EasyOCR Fallback...")
         self.reader = easyocr.Reader(['en'], gpu=torch.cuda.is_available())
@@ -480,6 +497,84 @@ class HARPEngine:
 
         return self._resize_small(img_copy)
 
+    # -----------------------------------------------------------------------
+    # [6.6] Top-N candidates from C4 physics solver (for ContrastiveExplainer)
+    # -----------------------------------------------------------------------
+    def _get_top_n_candidates(self, a1: float, a2: float, n: int = 4) -> list:
+        """
+        Run the C4 physics solver over all 720 minute values and return the
+        top-N candidates sorted by ascending physics error.
+
+        Returns: list of (hour, minute, error) tuples.
+        """
+        errors = np.abs(self.theory_h - a1) + np.abs(self.theory_m - a2)
+        idx    = np.argsort(errors)[:n * 3]      # Over-sample before dedup
+        seen   = set()
+        results = []
+        for i in idx:
+            total_minutes = int(self.possible_minutes[i])
+            h = (total_minutes // 60) % 12 or 12
+            m = total_minutes % 60
+            key = (h, m)
+            if key not in seen:
+                seen.add(key)
+                results.append((h, m, float(errors[i])))
+            if len(results) >= n:
+                break
+        return results
+
+    # -----------------------------------------------------------------------
+    # [6.7] Hand type heuristic: shorter arm = hour, longer arm = minute
+    # -----------------------------------------------------------------------
+    def _classify_hand_type_heuristic(self, tip1, tip2, center) -> str:
+        """
+        Uses the Euclidean distance from center to each tip to infer which
+        hand is the hour (shorter) vs minute (longer) hand.
+
+        Returns a human-readable string for debug_info.
+        """
+        try:
+            len1 = float(np.linalg.norm(np.array(tip1) - np.array(center)))
+            len2 = float(np.linalg.norm(np.array(tip2) - np.array(center)))
+            ratio = round(min(len1, len2) / max(len1, len2 + 1e-6), 2)
+            if len1 < len2:
+                return f"Hand1=Hour ({len1:.0f}px), Hand2=Minute ({len2:.0f}px), length ratio={ratio}"
+            else:
+                return f"Hand1=Minute ({len1:.0f}px), Hand2=Hour ({len2:.0f}px), length ratio={ratio}"
+        except Exception:
+            return "Hand type heuristic: unable to compute (missing keypoints)"
+
+    # -----------------------------------------------------------------------
+    # [6.7] Dual-head ResNet18 architecture stub (for future retraining)
+    # -----------------------------------------------------------------------
+    def _get_c3_arch_dual(self):
+        """
+        Dual-head ResNet18:
+          Head 1 — angle regression (compatible with existing best.pth)
+          Head 2 — hand-type classification (hour=0, minute=1)
+
+        NOTE: This requires the model to be retrained with both heads active.
+              For now it serves as the architecture reference.
+        """
+        import torch.nn as nn
+        from torchvision import models as tv_models
+
+        class DualHeadResNet(nn.Module):
+            def __init__(self):
+                super().__init__()
+                backbone = tv_models.resnet18(weights=None)
+                self.features = nn.Sequential(*list(backbone.children())[:-1])  # Strip FC
+                self.angle_head = nn.Sequential(nn.Linear(512, 1), nn.Sigmoid())
+                self.type_head  = nn.Sequential(nn.Linear(512, 2))   # logits for hour/minute
+
+            def forward(self, x):
+                feat = self.features(x).squeeze(-1).squeeze(-1)   # (B, 512)
+                angle = self.angle_head(feat)        # (B, 1) ∈ [0,1]
+                hand_type = self.type_head(feat)     # (B, 2) logits
+                return angle, hand_type
+
+        return DualHeadResNet()
+
     def analyze(self, img_array, force_expert=False, manual_min_val="", manual_max_val="",
                 device_time_str=None, enable_temporal=False):
         debug_info = []
@@ -700,9 +795,10 @@ class HARPEngine:
                     return {"time": f"{h}:{m:02d}", "method": "Fast Path (C3 Missing)", "visualizations": visualizations, "angles": {"hand1": a1, "hand2": a2}}
 
                 refined_angles = []
-                heatmaps = []
+                heatmaps     = []
+                raw_heatmaps = []   # [6.9] collect for ContrastiveExplainer + AdaptiveRouter
                 c3_crops = []
-                
+
                 for i, (tip, rough_angle) in enumerate(zip([tip1, tip2], [a1, a2])):
                     crop = self._get_crop(target_crop, center, rough_angle)
                     if crop.size == 0:
@@ -710,46 +806,49 @@ class HARPEngine:
                         continue
                     c3_crops.append(crop)
 
-                    pil_crop = Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
+                    pil_crop    = Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
                     pil_resized = pil_crop.resize((64, 64))
-                    t_input = self.c3_transform(pil_resized).unsqueeze(0).to(self.device)
+                    t_input     = self.c3_transform(pil_resized).unsqueeze(0).to(self.device)
 
                     norm_crop = np.array(pil_resized, dtype=np.float32) / 255.0
-                    # [FIX-1] xai.generate now returns (visualization, raw_heatmap)
+                    # [FIX-1] xai.generate returns (visualization, raw_heatmap)
                     hand_heatmap_vis, raw_heatmap = self.xai.generate(t_input, norm_crop)
                     heatmaps.append(hand_heatmap_vis)
+                    raw_heatmaps.append(raw_heatmap)
 
                     # [FIX-3] MC Dropout uncertainty estimation
                     c3_angle, uncertainty_std = self._predict_with_uncertainty(t_input)
                     delta = c3_angle - 360 if c3_angle > 180 else c3_angle
 
-                    # Always generate LocalExplainer output (no API needed).
-                    # Gemini semantic explanation only fires when force_expert=True.
-                    if self.explainer:
+                    # [6.9] Adaptive XAI Routing: auto-escalate to Gemini when heatmap is diffuse
+                    if self.adaptive_router:
+                        explanation, routing_reason, entropy_val = self.adaptive_router.explain(
+                            raw_heatmap, crop, hand_heatmap_vis,
+                            c3_angle, hand_type=f"Hand {i+1}"
+                        )
+                        debug_info.append(f"AI Insight Hand {i+1}: {explanation}")
+                        debug_info.append(routing_reason)
+                    elif self.explainer:
                         explanation = self.explainer.explain(
                             crop, hand_heatmap_vis, c3_angle,
                             hand_type=f"Hand {i+1}",
                             raw_heatmap=raw_heatmap,
-                            use_gemini=force_expert,   # Gemini only on explicit expert mode
+                            use_gemini=force_expert,
                         )
                         debug_info.append(f"AI Insight Hand {i+1}: {explanation}")
 
                     debug_info.append(
-                        f"Hand {i+1}: C3 delta={delta:.1f}°, uncertainty=±{uncertainty_std:.1f}°"
+                        f"Hand {i+1}: C3 delta={delta:.1f}\u00b0, uncertainty=\u00b1{uncertainty_std:.1f}\u00b0"
                     )
 
                     # [FIX-4] Adaptive confidence-weighted delta fusion
-                    # alpha=1.0 → fully trust C3; alpha=0.0 → fully keep C2 geometry
                     alpha = float(np.clip(1.0 - (uncertainty_std / 20.0), 0.0, 1.0))
                     if abs(delta) > 20.0:
-                        # Emergency cap: C3 is too far off — discard
-                        debug_info.append(f"Hand {i+1}: C3 delta exceeds cap — keeping C2 angle.")
+                        debug_info.append(f"Hand {i+1}: C3 delta exceeds cap \u2014 keeping C2 angle.")
                         refined_angles.append(rough_angle)
                     else:
                         blended = (alpha * (rough_angle + delta) + (1.0 - alpha) * rough_angle) % 360
-                        debug_info.append(
-                            f"Hand {i+1}: alpha={alpha:.2f} → blended={blended:.1f}°"
-                        )
+                        debug_info.append(f"Hand {i+1}: alpha={alpha:.2f} \u2192 blended={blended:.1f}\u00b0")
                         refined_angles.append(blended)
 
                 if len(heatmaps) == 2:
@@ -759,9 +858,45 @@ class HARPEngine:
                 else:
                     heatmap_img = None
 
+                # [6.10] LIME + SHAP supplementary explainers (run on hand1 crop if available)
+                if c3_crops and raw_heatmaps:
+                    lime_overlay = None
+                    shap_overlay = None
+                    try:
+                        if self.lime_explainer and self.lime_explainer.available:
+                            first_crop = c3_crops[0]
+                            first_norm = np.array(
+                                Image.fromarray(cv2.cvtColor(first_crop, cv2.COLOR_BGR2RGB)).resize((64,64)),
+                                dtype=np.float32
+                            ) / 255.0
+                            first_t = self.c3_transform(
+                                Image.fromarray(cv2.cvtColor(first_crop, cv2.COLOR_BGR2RGB)).resize((64,64))
+                            ).unsqueeze(0).to(self.device)
+                            lime_overlay = self.lime_explainer.explain(self.c3_model, first_t, first_norm)
+                            if lime_overlay is not None:
+                                debug_info.append("LIME: Superpixel explanation generated.")
+                    except Exception as e:
+                        debug_info.append(f"LIME: failed ({e})")
+                    try:
+                        if self.shap_explainer and self.shap_explainer.available:
+                            first_crop = c3_crops[0]
+                            first_t = self.c3_transform(
+                                Image.fromarray(cv2.cvtColor(first_crop, cv2.COLOR_BGR2RGB)).resize((64,64))
+                            ).unsqueeze(0).to(self.device)
+                            background = torch.zeros(5, *first_t.shape[1:], device=self.device)
+                            shap_overlay = self.shap_explainer.explain(self.c3_model, first_t, background)
+                            if shap_overlay is not None:
+                                debug_info.append("SHAP: DeepExplainer attribution generated.")
+                    except Exception as e:
+                        debug_info.append(f"SHAP: failed ({e})")
+                    if lime_overlay is not None:
+                        visualizations['lime_heatmap'] = lime_overlay
+                    if shap_overlay is not None:
+                        visualizations['shap_heatmap'] = shap_overlay
+
                 # Surface uncertainty in result
                 uncertainty_summary = ", ".join(
-                    [f"H{j+1}=±{self._last_uncertainties[j]:.1f}°"
+                    [f"H{j+1}=\u00b1{self._last_uncertainties[j]:.1f}\u00b0"
                      for j in range(len(self._last_uncertainties))]
                 ) if hasattr(self, '_last_uncertainties') else "N/A"
                 
@@ -796,7 +931,22 @@ class HARPEngine:
                 if ambiguity_warning_expert and not ambiguity_warning:
                     debug_info.append(ambiguity_warning_expert)
                 drift_str_expert = self._calculate_drift(h_new, m_new, device_time_str)
-                
+
+                # [6.7] Hand type heuristic: shorter hand = hour
+                hand_type_info = self._classify_hand_type_heuristic(tip1, tip2, center)
+                debug_info.append(f"Hand Type Heuristic: {hand_type_info}")
+
+                # [6.6] Contrastive XAI — "Why not X:XX?"
+                contrastive_xai = None
+                if self.contrastive_explainer and raw_heatmaps:
+                    top_n = self._get_top_n_candidates(refined_angles[0], refined_angles[1], n=4)
+                    fused_hm = raw_heatmaps[0]   # Use hand1 heatmap as primary
+                    contrastive_xai = self.contrastive_explainer.explain(
+                        fused_hm, h_new, m_new, top_n,
+                        hand1_angle=refined_angles[0],
+                    )
+                    debug_info.append(f"Contrastive XAI: {contrastive_xai[:80]}...")
+
                 return {
                     "time": f"{h_new}:{m_new:02d}",
                     "method": "Expert Path (C1+C2+C3+C4)",
@@ -805,7 +955,7 @@ class HARPEngine:
                     "debug": debug_info,
                     "visualizations": visualizations,
                     "angles": {"hand1": refined_angles[0], "hand2": refined_angles[1]},
-                    "reasoning": f"Refined: H={refined_angles[0]:.1f}°, M={refined_angles[1]:.1f}° → Time={h_new}:{m_new:02d}",
+                    "reasoning": f"Refined: H={refined_angles[0]:.1f}\u00b0, M={refined_angles[1]:.1f}\u00b0 \u2192 Time={h_new}:{m_new:02d}",
                     "error": "",
                     "ampm": ampm_status,
                     "drift": drift_str_expert,
@@ -813,6 +963,7 @@ class HARPEngine:
                     "uncertainty_deg": uncertainty_summary,
                     "xai_method": "GradCAM++ (multi-layer)",
                     "temporal_xai": temporal_xai,
+                    "contrastive_xai": contrastive_xai,
                 }
 
 # Alias mapping so you don't break existing `main.py` imports 

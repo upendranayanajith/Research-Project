@@ -206,38 +206,76 @@ def display_results(data):
             for idx, (col, crop) in enumerate(zip(c_cols, viz["c3_crops"])):
                 col.image(base64.b64decode(crop), width=100)
             if data.get("heatmap_b64"):
-                st.markdown(f"**{icon('opacity')} Attention Map (GradCAM++)**", unsafe_allow_html=True)
-                st.image(base64.b64decode(data["heatmap_b64"]), width=300)
+                xai_tabs = st.tabs(["🔥 GradCAM++", "🟢 LIME", "🔴 SHAP"])
+                with xai_tabs[0]:
+                    st.image(base64.b64decode(data["heatmap_b64"]), caption="GradCAM++ (multi-layer fused)", width=300)
+                with xai_tabs[1]:
+                    if "lime_heatmap" in viz:
+                        st.image(base64.b64decode(viz["lime_heatmap"]), caption="LIME: Superpixel perturbation (top-5 regions)", width=300)
+                    else:
+                        st.info("LIME heatmap not yet available. Run in Expert Path to generate.")
+                with xai_tabs[2]:
+                    if "shap_heatmap" in viz:
+                        st.image(base64.b64decode(viz["shap_heatmap"]), caption="SHAP: DeepExplainer pixel attribution (JET colormap)", width=300)
+                    else:
+                        st.info("SHAP heatmap not yet available. Run in Expert Path to generate.")
 
-            # --- AI Insight Explanations (Gemini or LocalExplainer) ---
+            # --- AI Insight Explanations (Gemini or LocalExplainer via AdaptiveRouter) ---
             debug_lines = res.get("debug", [])
             insight_lines = [l for l in debug_lines if "AI Insight" in l]
+            routing_lines = [l for l in debug_lines if "XAI Routing" in l]
             uncertainty_lines = [l for l in debug_lines if "uncertainty" in l.lower() or "alpha" in l.lower()]
 
             if insight_lines:
                 st.markdown("---")
                 st.markdown(f"**{icon('psychology')} AI Model Explanations**", unsafe_allow_html=True)
                 for line in insight_lines:
-                    # Strip the "AI Insight Hand X: " prefix for clean display
                     label, _, text = line.partition(": ")
                     hand_label = label.replace("AI Insight ", "")
-                    is_local = "[Local XAI]" in text
+                    is_local  = "[Local XAI]" in text
                     is_gemini = "[Gemini]" in text
                     badge = "🔵 Local" if is_local else "✨ Gemini" if is_gemini else "ℹ️"
                     clean_text = text.replace("[Local XAI] ", "").replace("[Gemini] ", "")
                     st.info(f"**{badge} — {hand_label}:** {clean_text}")
+                if routing_lines:
+                    for rl in routing_lines:
+                        escalated = "Gemini escalated" in rl
+                        r_icon = "✨" if escalated else "🔵"
+                        st.caption(f"{r_icon} {rl}")
             else:
                 st.markdown("---")
-                st.info("💡 AI Explanation: Enable **Force Expert Path** and re-run to generate model explanations.")
+                st.info("💡 AI Explanation: Enable **Force Expert Path** and re-run.")
+
+            # --- [6.6] Contrastive XAI: Why not X:XX? ---
+            contrastive_xai = res.get("contrastive_xai")
+            if contrastive_xai:
+                st.markdown("---")
+                st.markdown(f"**{icon('compare_arrows')} 🤔 Contrastive XAI: Why not...?**", unsafe_allow_html=True)
+                for line in contrastive_xai.split("\n"):
+                    if not line.strip():
+                        continue
+                    if line.startswith("["):
+                        st.markdown(line)
+                    elif "consistent ✅" in line:
+                        st.success(line.strip())
+                    elif "inconsistent ❌" in line:
+                        st.error(line.strip())
+                    else:
+                        st.markdown(line)
 
             # --- Uncertainty & Confidence ---
             if uncertainty_lines or res.get("uncertainty_deg"):
-                st.markdown(f"**{icon('bar_chart')} C3 Uncertainty**", unsafe_allow_html=True)
+                st.markdown(f"**{icon('bar_chart')} C3 Uncertainty (MC Dropout)**", unsafe_allow_html=True)
                 unc_val = res.get("uncertainty_deg", "N/A")
                 if unc_val and unc_val != "N/A":
                     st.success(f"**MC Dropout Uncertainty:** {unc_val}")
                 for line in uncertainty_lines:
                     st.caption(f"🔢 {line}")
+
+            # --- [6.7] Hand Type heuristic ---
+            hand_type_lines = [l for l in debug_lines if "Hand Type Heuristic" in l]
+            if hand_type_lines:
+                st.caption(f"🤚 {hand_type_lines[-1].replace(chr(72)+chr(97)+chr(110)+chr(100)+chr(32)+chr(84)+chr(121)+chr(112)+chr(101)+chr(32)+chr(72)+chr(101)+chr(117)+chr(114)+chr(105)+chr(115)+chr(116)+chr(105)+chr(99)+chr(58)+chr(32), chr(32))}")
 
             # --- Collapsible Debug Log ---
             with st.expander("🔍 Full Pipeline Debug Log", expanded=False):
