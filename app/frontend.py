@@ -436,6 +436,8 @@ def display_results(data):
 # ==========================================
 if "page" not in st.session_state:
     st.session_state.page = "analysis"
+if "img_rotation" not in st.session_state:
+    st.session_state.img_rotation = 0
 
 def nav_button(page_key, label, icon_name):
     """Creates a navigation button with an icon."""
@@ -475,7 +477,41 @@ st.sidebar.markdown("---")
 if st.session_state.page == "analysis":
     st.markdown(f"## {icon('cloud_upload')} File Analysis", unsafe_allow_html=True)
     uploaded_file = st.file_uploader("Choose an image...", type=["jpg", "png", "jpeg"])
-    
+
+    # --- Image Preview + Rotation Controls ---
+    if uploaded_file:
+        # Reset rotation when a new file is selected
+        if st.session_state.get("_analysis_last_file") != uploaded_file.name:
+            st.session_state.img_rotation = 0
+            st.session_state._analysis_last_file = uploaded_file.name
+
+        preview_img = Image.open(uploaded_file)
+        if st.session_state.img_rotation != 0:
+            preview_img = preview_img.rotate(-st.session_state.img_rotation, expand=True)
+
+        col_prev, col_ctrl = st.columns([2, 1])
+        with col_prev:
+            st.image(preview_img, caption=f"{st.session_state.img_rotation}° rotation applied", width=400)
+        with col_ctrl:
+            st.markdown(f"#### {icon('rotate_right')} Rotate Image", unsafe_allow_html=True)
+            st.caption("Use if the clock appears sideways or upside-down. Each click turns the image 90°.")
+            r1, r2 = st.columns(2)
+            if r1.button("↺ Left", use_container_width=True, key="rot_ccw", help="Rotate 90° to the left (counter-clockwise)"):
+                st.session_state.img_rotation = (st.session_state.img_rotation - 90) % 360
+                st.rerun()
+            if r2.button("↻ Right", use_container_width=True, key="rot_cw", help="Rotate 90° to the right (clockwise)"):
+                st.session_state.img_rotation = (st.session_state.img_rotation + 90) % 360
+                st.rerun()
+            if st.session_state.img_rotation != 0:
+                if st.button("Reset to 0°", use_container_width=True, key="rot_reset"):
+                    st.session_state.img_rotation = 0
+                    st.rerun()
+            st.markdown(
+                f"<div style='text-align:center; font-size:1.1rem; font-weight:600; color:#3b82f6'>"
+                f"{st.session_state.img_rotation}°</div>",
+                unsafe_allow_html=True,
+            )
+
     st.markdown("---")
     st.markdown(f"#### {icon('settings')} Configuration", unsafe_allow_html=True)
     force_expert = st.checkbox("Force Expert Path (Activate C3 + XAI)", value=False)
@@ -483,10 +519,16 @@ if st.session_state.page == "analysis":
     if uploaded_file and st.button("Run Analysis", type="primary"):
         with st.spinner("Processing..."):
             try:
-                image = Image.open(uploaded_file)
-                img_byte_arr = io.BytesIO()
-                image.save(img_byte_arr, format=image.format)
-                files = {"file": ("image.jpg", img_byte_arr.getvalue(), "image/jpeg")}
+                rotation = st.session_state.get("img_rotation", 0)
+                if rotation != 0:
+                    image = Image.open(uploaded_file)
+                    image = image.rotate(-rotation, expand=True)
+                    img_byte_arr = io.BytesIO()
+                    image.save(img_byte_arr, format="JPEG")
+                    img_bytes = img_byte_arr.getvalue()
+                else:
+                    img_bytes = uploaded_file.getvalue()
+                files = {"file": ("image.jpg", img_bytes, "image/jpeg")}
                 data_form = {"force_expert": str(force_expert)}
                 response = requests.post(f"{API_URL}/analyze", files=files, data=data_form)
                 if response.status_code == 200: display_results(response.json())
