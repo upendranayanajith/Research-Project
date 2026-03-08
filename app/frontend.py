@@ -22,7 +22,7 @@ if parent_dir not in sys.path:
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 API_URL = "http://localhost:8000"
-st.set_page_config(page_title="Chronos Vision", layout="wide", page_icon="static/favicon.ico")
+st.set_page_config(page_title="HARP Vision", layout="wide", page_icon="static/favicon.ico")
 
 # ── Google Material Symbols ───────────────────────────────────────────────────
 st.markdown('<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined" rel="stylesheet">', unsafe_allow_html=True)
@@ -54,38 +54,49 @@ STATUS_ICONS = {
 class ClockProcessor(VideoProcessorBase):
     def __init__(self):
         self.frame_count = 0
-        self.fps         = 0
-        self.last_time   = time.time()
-        self.force_expert = False
-        self.last_result  = None
-
-        from app.core.engine import ClockEngine
-        self.engine = ClockEngine(parent_dir)
+        self.fps = 0
+        self.last_time = time.time()
+        self.force_expert = False 
+        self.last_result = None
+        
+        from app.core.engine import HARPEngine
+        self.engine = HARPEngine(parent_dir)
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         img = frame.to_ndarray(format="bgr24")
         self.frame_count += 1
         now = time.time()
+        
+        # FPS Calculation
         if now - self.last_time > 1:
             self.fps         = self.frame_count
             self.frame_count = 0
             self.last_time   = now
 
+
+        # Process every 5th frame to save CPU
         if self.frame_count % 5 == 0:
             try:
                 self.last_result = self.engine.analyze(img, force_expert=self.force_expert)
             except Exception as e:
                 print(f"AI Error: {e}")
 
+        # Draw overlays
         if self.last_result:
             res = self.last_result
-            cv2.putText(img, f"TIME: {res.get('time', '--:--')}", (50, 100), cv2.FONT_HERSHEY_DUPLEX, 1.5, (0, 255, 0), 3)
+            
+            # Show Time or Gauge %
+            display_val = res.get('time', '--')
+            cv2.putText(img, f"READING: {display_val}", (50, 100), cv2.FONT_HERSHEY_DUPLEX, 1.2, (0, 255, 0), 3)
+            
             method = res.get('method', 'Unknown')
-            color  = (0, 255, 0) if "Fast" in method else (0, 0, 255)
+            color = (0, 255, 0) if "Fast" in method or "Gauge" in method else (0, 0, 255)
             cv2.putText(img, f"Mode: {method}", (50, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
-            if "angles" in res:
-                a1 = res["angles"]["hand1"]
-                a2 = res["angles"]["hand2"]
+            
+            # Only show angles if it's a clock
+            if "angles" in res and res["angles"].get("hand1", 0) != 0.0:
+                a1 = res["angles"].get("hand1", 0)
+                a2 = res["angles"].get("hand2", 0)
                 cv2.putText(img, f"H:{a1:.0f} M:{a2:.0f}", (50, 190), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
 
         cv2.putText(img, f"FPS: {self.fps}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
@@ -96,22 +107,21 @@ class ClockProcessor(VideoProcessorBase):
 # SHARED HELPERS
 # ============================================================
 def display_results(data):
-    """Render full clock analysis result (original — unchanged)."""
+    """Render full clock analysis result."""
     res         = data["result"]
     viz         = data.get("visualizations", {})
     ampm_data   = data.get("ampm", {})
     amb_data    = data.get("ambiguity", {})
     report_data = data.get("report", {})
 
-    if "error" in res:
+    if "error" in res and res["error"]:
         st.markdown(f"#### {icon('error', color='red')} Analysis Failed", unsafe_allow_html=True)
         st.error(res['error'])
         return
 
     st.markdown(f"#### {icon('check_circle', color='green')} Analysis Complete ({data['processing_time']:.3f}s)", unsafe_allow_html=True)
-
-    is_fast      = "Fast Path" in res["method"]
-    method_icon  = "bolt" if is_fast else "psychology"
+    is_fast = "Fast Path" in res["method"] or "Fast" in res["method"] or "Gauge" in res["method"]
+    method_icon = "bolt" if is_fast else "psychology"
     method_color = "green" if is_fast else "orange"
     st.markdown(f"**Method Used:** <span style='color:{method_color}'>{icon(method_icon, size=20)} {res['method']}</span>", unsafe_allow_html=True)
 
@@ -126,7 +136,7 @@ def display_results(data):
         is_active = False
         if "Expert" in res["method"]:
             is_active = True
-        elif name.split()[0] in active_list and "Fast" in res["method"] and "Expert" not in name:
+        elif name.split()[0] in active_list and ("Fast" in res["method"] or "Gauge" in res["method"]) and "Expert" not in name:
             is_active = True
         color = "green" if is_active else "grey"
         col.markdown(f"{icon(icn, color=color)} {name}", unsafe_allow_html=True)
@@ -185,14 +195,19 @@ def display_results(data):
                 )
 
     with tab2:
-        st.markdown(f"{icon('timeline')} **C2 — Skeleton Structure Analysis**", unsafe_allow_html=True)
+        st.markdown(f"{icon('timeline')} **C2 — Skeleton Structure Analysis / Keypoints**", unsafe_allow_html=True)
+        col2a, col2b = st.columns(2)
+        with col2a:
+            if "c2_skeleton" in viz: st.image(base64.b64decode(viz["c2_skeleton"]), width=300)
+        with col2b:
+            if "scale" in res and res["scale"]:
+                st.markdown("### OCR Scale Check")
+                st.info(f"**Min Reading:** {res['scale'].get('min', 'Failed')}")
+                st.error(f"**Max Reading:** {res['scale'].get('max', 'Failed')}")
+        
         c2e = data.get("c2_enhanced", {})
         c2v = data.get("c2_research_visuals", {})
-        if not c2e:
-            if "c2_skeleton" in viz:
-                st.image(base64.b64decode(viz["c2_skeleton"]), width=350)
-            st.info("Enhanced C2 data not available.")
-        else:
+        if c2e:
             s1, s2, s3, s4, s5, s6 = st.tabs(["🦴 Skeleton", "🔭 Scale Analysis", "🧊 3D Reconstruction", "🌍 Manifold", "⏱ Temporal", "📊 Impact Summary"])
             with s1:
                 col_l, col_r = st.columns([2, 1])
@@ -254,7 +269,6 @@ def display_results(data):
                     st.image(base64.b64decode(c2v["comparison"]), use_container_width=True)
                 if c2v.get("impact_kpis"):
                     st.image(base64.b64decode(c2v["impact_kpis"]), use_container_width=True)
-
     with tab3:
         st.markdown(f"{icon('psychology')} **Angle Predictions**", unsafe_allow_html=True)
         col_a, col_b = st.columns(2)
@@ -262,9 +276,16 @@ def display_results(data):
             if "c3_angles" in viz:
                 st.image(base64.b64decode(viz["c3_angles"]), caption="Angle Visual", width=300)
         with col_b:
-            if "angles" in res:
-                st.markdown(f"**H:** {res['angles']['hand1']:.1f}°")
-                st.markdown(f"**M:** {res['angles']['hand2']:.1f}°")
+            if "angles" in res and res["angles"]:
+                if "span" in res["angles"]:
+                    st.markdown(f"**Total Scale Span:** {res['angles'].get('span', 0):.1f}°")
+                    st.markdown(f"**Needle Pos:** {res['angles'].get('needle', 0):.1f}°")
+                    upd = res['angles'].get('units_per_deg', 0.0)
+                    if upd > 0:
+                        st.markdown(f"**1° Angle =** {upd:.4f} scale units")
+                else:
+                    st.markdown(f"**H:** {res['angles'].get('hand1', 0):.1f}°")
+                    st.markdown(f"**M:** {res['angles'].get('hand2', 0):.1f}°")
         if "c3_crops" in viz and viz["c3_crops"]:
             st.markdown("---")
             c_cols = st.columns(len(viz["c3_crops"]))
@@ -272,9 +293,7 @@ def display_results(data):
                 col.image(base64.b64decode(crop), width=100)
             if data.get("heatmap_b64"):
                 st.image(base64.b64decode(data["heatmap_b64"]), width=300)
-        else:
-            st.info("Fast Path Used — Expert AI skipped.")
-
+        else: st.info("Expert AI skipped (Fast Path or Gauge Mode used).")
     with tab4:
         st.markdown(f"# {icon('schedule')} {res['time']}", unsafe_allow_html=True)
         unc    = res.get('uncertainty', '')
@@ -466,53 +485,81 @@ if st.session_state.page == "analysis":
     uploaded_file = st.file_uploader("Choose an image...", type=["jpg", "png", "jpeg"])
     st.markdown("---")
     st.markdown(f"#### {icon('settings')} Configuration", unsafe_allow_html=True)
+    
     force_expert = st.checkbox("Force Expert Path (Activate C3 + XAI)", value=False)
+    st.markdown(f"#### {icon('speed')} Pre-Defined Gauge Templates", unsafe_allow_html=True)
+    gauge_template = st.selectbox(
+        "Select Scale Template",
+        ["Auto-Detect (AI OCR)", "0 to 30", "0 to 50", "0 to 100", "0 to 160", "-10 to 50"],
+        index=0,
+        help="If you know the gauge scale, select it here to bypass OCR extraction for 100% accuracy."
+    )
+    
+    st.markdown(f"#### {icon('edit')} Manual Gauge Scale Overrides", unsafe_allow_html=True)
+    colA, colB = st.columns(2)
+    manual_min = colA.text_input("Min Value (Optional)", "")
+    manual_max = colB.text_input("Max Value (Optional)", "")
+
     if uploaded_file and st.button("Run Analysis", type="primary"):
         with st.spinner("Processing..."):
             try:
                 image        = Image.open(uploaded_file)
                 img_byte_arr = io.BytesIO()
                 image.save(img_byte_arr, format=image.format)
-                files     = {"file": ("image.jpg", img_byte_arr.getvalue(), "image/jpeg")}
-                data_form = {"force_expert": str(force_expert)}
-                response  = requests.post(f"{API_URL}/analyze", files=files, data=data_form)
-                if response.status_code == 200:
-                    display_results(response.json())
-                else:
-                    st.error(f"Server Error: {response.status_code}")
-            except Exception as e:
-                st.error(f"Connection Failed: {e}")
+                files = {"file": ("image.jpg", img_byte_arr.getvalue(), "image/jpeg")}
+                data_form = {
+                    "force_expert": str(force_expert),
+                    "gauge_template": gauge_template,
+                    "manual_min_val": manual_min if manual_min.strip() else "",
+                    "manual_max_val": manual_max if manual_max.strip() else ""
+                }
+                response = requests.post(f"{API_URL}/analyze", files=files, data=data_form)
+                if response.status_code == 200: display_results(response.json())
+                else: st.error(f"Server Error: {response.status_code}")
+            except Exception as e: st.error(f"Connection Failed: {e}")
 
 elif st.session_state.page == "webcam":
     st.markdown(f"## {icon('videocam')} Real-Time Analysis", unsafe_allow_html=True)
-    st.info("Running C1 (Localization) + C2 (Pose) locally. C4 runs on every 5th frame.")
+    st.info("Running C1 (Localization) + C2 (Pose) locally. Processes every 5th frame.")
     rtc_configuration = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
     col1, col2 = st.columns([3, 1])
+    
     with col1:
         ctx = webrtc_streamer(
-            key="clock-ai", video_processor_factory=ClockProcessor,
-            rtc_configuration=rtc_configuration,
-            media_stream_constraints={"video": True, "audio": False},
-            async_processing=True,
+            key="harp-ai", 
+            video_processor_factory=ClockProcessor, 
+            rtc_configuration=rtc_configuration, 
+            media_stream_constraints={"video": True, "audio": False}, 
+            async_processing=True
         )
     with col2:
         st.markdown(f"### {icon('tune')} Controls", unsafe_allow_html=True)
         if ctx.video_processor:
+            
+            # Expert Mode Toggle
             st.markdown(f"{icon('military_tech')} **Force Expert Mode**", unsafe_allow_html=True)
-            ctx.video_processor.force_expert = st.checkbox("", value=False)
+            ctx.video_processor.force_expert = st.checkbox("Enable C3/XAI", value=False)
+            
         st.markdown("---")
-        if st.button("Reset Connection"):
+        if st.button("Reset Connection"): 
             st.cache_resource.clear()
             st.rerun()
 
 elif st.session_state.page == "batch":
     st.markdown(f"## {icon('perm_media')} Batch Processing", unsafe_allow_html=True)
+    
     uploaded_files = st.file_uploader("Upload Images", accept_multiple_files=True)
     if uploaded_files and st.button("Process All"):
         files = [("files", (f.name, f.getvalue(), f.type)) for f in uploaded_files]
+        data_form = {
+            "force_expert": "False",
+            "gauge_template": "Auto-Detect (AI OCR)",
+            "manual_min_val": "",
+            "manual_max_val": ""
+        }
         with st.spinner("Processing Batch..."):
             try:
-                res = requests.post(f"{API_URL}/analyze_batch", files=files)
+                res = requests.post(f"{API_URL}/analyze_batch", files=files, data=data_form)
                 if res.status_code == 200:
                     data = res.json()
                     st.markdown(f"#### {icon('check_circle')} Processed {data['total_images']} images", unsafe_allow_html=True)
