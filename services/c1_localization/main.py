@@ -3,7 +3,10 @@ from fastapi.middleware.cors import CORSMiddleware
 import cv2
 import numpy as np
 import base64
+import io
 import os
+from PIL import Image as PILImage
+import PIL.ImageOps
 from ultralytics import YOLO
 
 app = FastAPI(title="C1 - Clock Localization Service")
@@ -167,8 +170,15 @@ async def health():
 @app.post("/localize")
 async def localize(file: UploadFile = File(...)):
     contents = await file.read()
-    nparr = np.frombuffer(contents, np.uint8)
-    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    # Auto-correct EXIF orientation (fixes sideways/upside-down photos from mobile devices)
+    try:
+        pil_img = PILImage.open(io.BytesIO(contents))
+        pil_img = PIL.ImageOps.exif_transpose(pil_img)
+        pil_img = pil_img.convert("RGB")
+        img = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+    except Exception:
+        nparr = np.frombuffer(contents, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
     if c1_model is None:
         return {
