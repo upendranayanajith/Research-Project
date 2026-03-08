@@ -167,6 +167,13 @@ def display_results(data):
     with tab4:
         st.markdown(f"# {icon('schedule')} {res['time']}", unsafe_allow_html=True)
         st.markdown(f"**Reasoning:** `{res.get('reasoning', 'N/A')}`")
+        if "ampm" in res:
+            ampm_icon = "wb_sunny" if "AM" in res["ampm"] else "bedtime"
+            st.markdown(f"**{icon(ampm_icon)} Time of Day:** {res['ampm']}", unsafe_allow_html=True)
+        if "drift" in res:
+            st.markdown(f"**{icon('compare_arrows')} Accuracy vs Real-time:** {res['drift']}", unsafe_allow_html=True)
+        if "ambiguity" in res and res["ambiguity"]:
+            st.warning(f"{res['ambiguity']}")
 
 # ==========================================
 # CUSTOM NAVIGATION LOGIC
@@ -198,6 +205,7 @@ st.sidebar.markdown("---")
 nav_button("analysis", "File Analysis", "cloud_upload")
 nav_button("webcam", "Live Webcam", "videocam")
 nav_button("batch", "Batch Processing", "perm_media")
+nav_button("comparator", "Time Comparator", "compare")
 nav_button("dashboard", "Analytics", "monitoring")
 
 st.sidebar.markdown("---")
@@ -224,6 +232,9 @@ if st.session_state.page == "analysis":
     if uploaded_file and st.button("Run Analysis", type="primary"):
         with st.spinner("Processing..."):
             try:
+                from datetime import datetime
+                device_time_str = datetime.now().isoformat()
+                
                 image = Image.open(uploaded_file)
                 img_byte_arr = io.BytesIO()
                 image.save(img_byte_arr, format=image.format)
@@ -231,7 +242,8 @@ if st.session_state.page == "analysis":
                 data_form = {
                     "force_expert": str(force_expert),
                     "manual_min_val": manual_min if manual_min.strip() else "",
-                    "manual_max_val": manual_max if manual_max.strip() else ""
+                    "manual_max_val": manual_max if manual_max.strip() else "",
+                    "device_time_str": device_time_str
                 }
                 response = requests.post(f"{API_URL}/analyze", files=files, data=data_form)
                 if response.status_code == 200: display_results(response.json())
@@ -289,6 +301,37 @@ elif st.session_state.page == "batch":
                     st.dataframe(pd.DataFrame(data["results"]), use_container_width=True)
                 else: st.error("Batch failed.")
             except Exception as e: st.error(f"Error: {e}")
+
+# --- PAGE COMP: TIME COMPARATOR ---
+elif st.session_state.page == "comparator":
+    st.markdown(f"## {icon('compare')} Time Comparator", unsafe_allow_html=True)
+    st.markdown("Upload a 'Before' and 'After' picture of a clock to calculate elapsed time.")
+    
+    col1, col2 = st.columns(2)
+    file_before = col1.file_uploader("Upload 'Before' Clock", type=["jpg", "png", "jpeg"], key="fb")
+    file_after = col2.file_uploader("Upload 'After' Clock", type=["jpg", "png", "jpeg"], key="fa")
+    
+    if file_before and file_after:
+        if st.button("Compare Times", type="primary"):
+            with st.spinner("Analyzing both clocks..."):
+                try:
+                    img_b = io.BytesIO(file_before.getvalue())
+                    img_a = io.BytesIO(file_after.getvalue())
+                    files = {
+                        "file_before": ("before.jpg", img_b, "image/jpeg"),
+                        "file_after": ("after.jpg", img_a, "image/jpeg")
+                    }
+                    response = requests.post(f"{API_URL}/compare_times", files=files)
+                    if response.status_code == 200:
+                        data = response.json()
+                        st.success(f"**Elapsed Time:** {data['elapsed_text']}")
+                        c1, c2 = st.columns(2)
+                        c1.metric("Time Before", data['time_before'])
+                        c2.metric("Time After", data['time_after'])
+                    else:
+                        st.error(f"Error: {response.json().get('error', 'Unknown Error')}")
+                except Exception as e:
+                    st.error(f"Failed to connect: {e}")
 
 # --- PAGE 4: DASHBOARD ---
 elif st.session_state.page == "dashboard":

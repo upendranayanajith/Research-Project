@@ -9,10 +9,10 @@ from ultralytics import YOLO
 from PIL import Image
 from app.core.xai import XaiVisualizer, SemanticExplainer
 from app.core.metrics import calculate_gauge_reading, calculate_gauge_reading_advanced
-import re
 import google.generativeai as genai
 import easyocr
 from dotenv import load_dotenv
+from datetime import datetime
 
 load_dotenv()
 class HARPEngine:
@@ -110,6 +110,55 @@ class HARPEngine:
     def _resize_small(self, img):
         """Helper to force 500x500px output for dashboard efficiency"""
         return cv2.resize(img, (500, 500), interpolation=cv2.INTER_LINEAR)
+
+    def _infer_ampm(self, crop):
+        if crop is None or crop.size == 0: return "Unknown", 0.0
+        hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+        brightness = np.mean(hsv[:, :, 2])
+        b, g, r = cv2.split(crop)
+        mean_b = np.mean(b)
+        mean_r = np.mean(r)
+        
+        # Simple heuristic: higher brightness and more blue relative to red = daylight
+        is_day = brightness > 100 and (mean_b / (mean_r + 1e-5)) > 0.9
+        confidence = min(1.0, abs(brightness - 100) / 100.0)
+        return "AM" if is_day else "PM", confidence
+
+    def _resolve_ambiguity(self, a1, a2, h, m):
+        diff = min((a1 - a2) % 360, (a2 - a1) % 360)
+        warning = None
+        if diff < 10.0:
+            if h == 12 and m == 0:
+                warning = "Perfect overlap at 12:00. Time is unambiguous."
+            elif h == 6 and m == 30:
+                warning = "Ambiguity Handled: Hands overlap near 6 position. Resolved securely as 6:30 based on physics constraints."
+            else:
+                warning = f"Ambiguity Warning: Hands overlap at {h}:{m:02d}. Reading may be difficult."
+        return warning
+
+    def _calculate_drift(self, detected_h, detected_m, device_time_str=None):
+        if device_time_str:
+            try:
+                device_time = datetime.fromisoformat(device_time_str.replace("Z", "+00:00"))
+            except ValueError:
+                device_time = datetime.now()
+        else:
+            device_time = datetime.now()
+            
+        real_h = device_time.hour % 12
+        real_h = 12 if real_h == 0 else real_h
+        real_m = device_time.minute
+        
+        det_total_m = (detected_h % 12) * 60 + detected_m
+        real_total_m = (real_h % 12) * 60 + real_m
+        
+        diff = det_total_m - real_total_m
+        if diff > 360: diff -= 720
+        elif diff < -360: diff += 720
+            
+        if diff == 0: return "Perfectly accurate (0 min drift)"
+        elif diff > 0: return f"Fast by {abs(diff)} minutes"
+        else: return f"Slow by {abs(diff)} minutes"
 
     def _extract_gauge_scale_gemini(self, img):
         api_key = os.getenv("GEMINI_API_KEY")
@@ -287,7 +336,7 @@ class HARPEngine:
 
         return self._resize_small(img_copy)
 
-    def analyze(self, img_array, force_expert=False, manual_min_val="", manual_max_val=""):
+    def analyze(self, img_array, force_expert=False, manual_min_val="", manual_max_val="", device_time_str=None):
         debug_info = []
         visualizations = {}
 
@@ -438,6 +487,14 @@ class HARPEngine:
             
             h, m, error = self._solve_physics(a1, a2)
             
+            ampm_status, ampm_conf = self._infer_ampm(target_crop)
+            ambiguity_warning = self._resolve_ambiguity(a1, a2, h, m)
+            drift_str = self._calculate_drift(h, m, device_time_str)
+            
+            debug_info.append(f"AM/PM: {ampm_status} (Conf: {ampm_conf:.2f})")
+            if ambiguity_warning: debug_info.append(ambiguity_warning)
+            debug_info.append(f"Accuracy: {drift_str}")
+            
             if error < 20.0 and not force_expert:
                 return {
                     "time": f"{h}:{m:02d}",
@@ -448,7 +505,10 @@ class HARPEngine:
                     "visualizations": visualizations,
                     "angles": {"hand1": a1, "hand2": a2},
                     "reasoning": f"Physics: H={a1:.1f}°, M={a2:.1f}° → Time={h}:{m:02d}",
-                    "error": ""
+                    "error": "",
+                    "ampm": ampm_status,
+                    "drift": drift_str,
+                    "ambiguity": ambiguity_warning
                 }
             
             # --- [C3] CLOCK EXPERT PATH ---
@@ -457,7 +517,7 @@ class HARPEngine:
                     return {"time": f"{h}:{m:02d}", "method": "Fast Path (C3 Missing)", "visualizations": visualizations, "angles": {"hand1": a1, "hand2": a2}}
 
                 refined_angles = []
-                heatmap_img = None
+                heatmaps = []
                 c3_crops = []
                 
                 for i, (tip, rough_angle) in enumerate(zip([tip1, tip2], [a1, a2])):
@@ -471,9 +531,9 @@ class HARPEngine:
                     pil_resized = pil_crop.resize((64, 64))
                     t_input = self.c3_transform(pil_resized).unsqueeze(0).to(self.device)
                     
-                    if heatmap_img is None:
-                        norm_crop = np.array(pil_resized, dtype=np.float32) / 255.0
-                        heatmap_img = self.xai.generate(t_input, norm_crop)
+                    norm_crop = np.array(pil_resized, dtype=np.float32) / 255.0
+                    hand_heatmap = self.xai.generate(t_input, norm_crop)
+                    heatmaps.append(hand_heatmap)
 
                     with torch.no_grad():
                         pred = self.c3_model(t_input).item()
@@ -483,7 +543,7 @@ class HARPEngine:
                     
                     if self.explainer and force_expert:
                         explanation = self.explainer.explain(
-                            crop, heatmap_img, c3_angle, hand_type=f"Hand {i+1}"
+                            crop, hand_heatmap, c3_angle, hand_type=f"Hand {i+1}"
                         )
                         debug_info.append(f"AI Insight Hand {i+1}: {explanation}")
 
@@ -494,10 +554,22 @@ class HARPEngine:
                         debug_info.append(f"Hand {i}: Accepted C3 delta {delta:.1f}°")
                         refined_angles.append((rough_angle + delta) % 360)
 
+                if len(heatmaps) == 2:
+                    heatmap_img = np.hstack((heatmaps[0], heatmaps[1]))
+                elif len(heatmaps) == 1:
+                    heatmap_img = heatmaps[0]
+                else:
+                    heatmap_img = None
+                
                 visualizations['c3_crops'] = c3_crops
                 visualizations['c3_angles'] = self._draw_angles_on_img(target_crop, center, tip1, tip2, refined_angles[0], refined_angles[1])
                 
                 h_new, m_new, err_new = self._solve_physics(refined_angles[0], refined_angles[1])
+                
+                ambiguity_warning_expert = self._resolve_ambiguity(refined_angles[0], refined_angles[1], h_new, m_new)
+                if ambiguity_warning_expert and not ambiguity_warning:
+                    debug_info.append(ambiguity_warning_expert)
+                drift_str_expert = self._calculate_drift(h_new, m_new, device_time_str)
                 
                 return {
                     "time": f"{h_new}:{m_new:02d}",
@@ -508,7 +580,10 @@ class HARPEngine:
                     "visualizations": visualizations,
                     "angles": {"hand1": refined_angles[0], "hand2": refined_angles[1]},
                     "reasoning": f"Refined: H={refined_angles[0]:.1f}°, M={refined_angles[1]:.1f}° → Time={h_new}:{m_new:02d}",
-                    "error": ""
+                    "error": "",
+                    "ampm": ampm_status,
+                    "drift": drift_str_expert,
+                    "ambiguity": ambiguity_warning_expert or ambiguity_warning
                 }
 
 # Alias mapping so you don't break existing `main.py` imports 

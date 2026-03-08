@@ -33,7 +33,8 @@ async def analyze_image(
     file: UploadFile = File(...), 
     force_expert: bool = Form(False),
     manual_min_val: str = Form(""),
-    manual_max_val: str = Form("")
+    manual_max_val: str = Form(""),
+    device_time_str: str = Form(None)
 ):
     start_time = time.time()
     
@@ -54,7 +55,8 @@ async def analyze_image(
         img, 
         force_expert=force_expert, 
         manual_min_val=manual_min_val, 
-        manual_max_val=manual_max_val
+        manual_max_val=manual_max_val,
+        device_time_str=device_time_str
     )
     
     processing_time = time.time() - start_time
@@ -101,6 +103,58 @@ async def analyze_image(
         "heatmap_b64": heatmap_b64,
         "processing_time": processing_time
     }
+
+# --- COMPARATOR ENDPOINT ---
+@app.post("/compare_times")
+async def compare_times(
+    file_before: UploadFile = File(...),
+    file_after: UploadFile = File(...)
+):
+    start_time = time.time()
+    
+    async def process_file(upload_file):
+        contents = await upload_file.read()
+        nparr = np.frombuffer(contents, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img is None: raise ValueError("Invalid image")
+        res = engine.analyze(img, force_expert=False)
+        return res
+        
+    try:
+        res_before = await process_file(file_before)
+        res_after = await process_file(file_after)
+        
+        if res_before.get("error") or res_after.get("error"):
+            return JSONResponse(status_code=400, content={"error": "Failed to analyze one or both images."})
+            
+        tb = res_before.get("time", "")
+        ta = res_after.get("time", "")
+        
+        if ":" not in tb or ":" not in ta:
+            return JSONResponse(status_code=400, content={"error": "Both images must be analog clocks."})
+            
+        hb, mb = map(int, tb.split(":"))
+        ha, ma = map(int, ta.split(":"))
+        
+        min_b = (hb % 12) * 60 + mb
+        min_a = (ha % 12) * 60 + ma
+        
+        diff = min_a - min_b
+        if diff < 0:
+            diff += 720
+            
+        elapsed_h = diff // 60
+        elapsed_m = diff % 60
+        
+        return {
+            "time_before": tb,
+            "time_after": ta,
+            "elapsed_minutes": diff,
+            "elapsed_text": f"From {tb} to {ta} → {diff} minutes elapsed ({elapsed_h}h {elapsed_m}m)",
+            "processing_time": time.time() - start_time
+        }
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 # --- [C4] BATCH PROCESSING ---
 @app.post("/analyze_batch")
