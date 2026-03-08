@@ -62,6 +62,7 @@ class HARPEngine:
         
         print("Loading EasyOCR Fallback...")
         self.reader = easyocr.Reader(['en'], gpu=torch.cuda.is_available())
+
     def _load_yolo(self, path, name):
         try:
             print(f"Loading {name}: {path}...")
@@ -82,28 +83,19 @@ class HARPEngine:
         angle = math.degrees(math.atan2(dx, -dy))
         return angle + 360 if angle < 0 else angle
 
-    # --- CLOCK PHYSICS SOLVER ---
+    # --- CLOCK PHYSICS SOLVER (Restored from main branch) ---
     def _solve_physics(self, a1, a2):
-        raw_minutes = a2 / 6.0
-        minutes = int(round(raw_minutes)) % 60
-        raw_hour_pos = a1 / 30.0
-        
-        if raw_hour_pos > 11.5 and minutes < 30:
-            raw_hour_pos = 0.0 
-            
-        if minutes < 45:
-            hour = int(math.floor(raw_hour_pos + 0.2))
-        else:
-            hour = int(round(raw_hour_pos)) - 1
-            
-        if hour <= 0: hour = 12
-        if hour > 12: hour = hour - 12
-        
-        theory_h_angle = (hour % 12 * 30) + (minutes * 0.5)
-        diff = abs(a1 - theory_h_angle)
-        error = min(diff, 360 - diff)
+        err_a = np.abs(a1 - self.theory_h) + np.abs(a2 - self.theory_m)
+        err_a = np.minimum(err_a, 720 - err_a)
+        err_b = np.abs(a2 - self.theory_h) + np.abs(a1 - self.theory_m)
+        err_b = np.minimum(err_b, 720 - err_b)
 
-        return hour, minutes, error
+        if np.min(err_a) < np.min(err_b):
+            idx = np.argmin(err_a)
+            return int(idx // 60) if int(idx // 60) != 0 else 12, int(idx % 60), np.min(err_a)
+        else:
+            idx = np.argmin(err_b)
+            return int(idx // 60) if int(idx // 60) != 0 else 12, int(idx % 60), np.min(err_b)
 
     def _get_crop(self, img, center, angle):
         h, w = img.shape[:2]
@@ -116,7 +108,8 @@ class HARPEngine:
         return rotated[y1:y2, x1:x2]
 
     def _resize_small(self, img):
-        return cv2.resize(img, (300, 300), interpolation=cv2.INTER_LINEAR)
+        """Helper to force 500x500px output for dashboard efficiency"""
+        return cv2.resize(img, (500, 500), interpolation=cv2.INTER_LINEAR)
 
     def _extract_gauge_scale_gemini(self, img):
         api_key = os.getenv("GEMINI_API_KEY")
@@ -190,33 +183,28 @@ class HARPEngine:
             except: return None
         return None
 
-    def _localize_object(self, img):
-        # Run both Gatekeeper models
+    def _get_crop_from_box(self, img, box, pad=30):
+        if box is None: return None, None
+        x1, y1, x2, y2 = map(int, box.xyxy[0])
+        h, w = img.shape[:2]
+        x1, y1 = max(0, x1 - pad), max(0, y1 - pad)
+        x2, y2 = min(w, x2 + pad), min(h, y2 + pad)
+        return img[y1:y2, x1:x2], (x1, y1, x2, y2)
+
+    def _localize_all(self, img):
         clock_res = self.c1_clock_model(img, verbose=False)[0] if self.c1_clock_model else None
         gauge_res = self.c1_gauge_model(img, verbose=False)[0] if self.c1_gauge_model else None
         
-        clock_conf, gauge_conf = -1, -1
-        clock_box, gauge_box = None, None
+        c_box = clock_res.boxes[0] if clock_res and len(clock_res.boxes) > 0 else None
+        g_box = gauge_res.boxes[0] if gauge_res and len(gauge_res.boxes) > 0 else None
         
-        if clock_res and len(clock_res.boxes) > 0:
-            clock_box = clock_res.boxes[0]
-            clock_conf = clock_box.conf.item()
-            
-        if gauge_res and len(gauge_res.boxes) > 0:
-            gauge_box = gauge_res.boxes[0]
-            gauge_conf = gauge_box.conf.item()
-            
-        if clock_conf == -1 and gauge_conf == -1: return img, False, None, None
+        c_crop, c_bbox = self._get_crop_from_box(img, c_box)
+        g_crop, g_bbox = self._get_crop_from_box(img, g_box)
         
-        detected_type = 'clock' if clock_conf > gauge_conf else 'gauge'
-        best_box = clock_box if detected_type == 'clock' else gauge_box
+        c_conf = c_box.conf.item() if c_box else -1.0
+        g_conf = g_box.conf.item() if g_box else -1.0
         
-        x1, y1, x2, y2 = map(int, best_box.xyxy[0])
-        h, w = img.shape[:2]
-        pad = 30
-        x1, y1 = max(0, x1 - pad), max(0, y1 - pad)
-        x2, y2 = min(w, x2 + pad), min(h, y2 + pad)
-        return img[y1:y2, x1:x2], True, (x1, y1, x2, y2), detected_type
+        return c_crop, c_bbox, c_conf, g_crop, g_bbox, g_conf
 
     def _draw_bbox(self, img, bbox, detected_type):
         img_copy = img.copy()
@@ -226,7 +214,8 @@ class HARPEngine:
         cv2.putText(img_copy, label, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
         return self._resize_small(img_copy)
 
-    def _draw_clock_angles(self, img, center, tip1, tip2, a1, a2):
+    # --- [C2] SKELETON VISUALIZATION (No Text) ---
+    def _draw_skeleton(self, img, center, tip1, tip2):
         img_copy = img.copy()
         center_pt = (int(center[0]), int(center[1]))
         tip1_pt = (int(tip1[0]), int(tip1[1]))
@@ -234,14 +223,30 @@ class HARPEngine:
         
         cv2.line(img_copy, center_pt, tip1_pt, (0, 255, 0), 4)
         cv2.line(img_copy, center_pt, tip2_pt, (0, 0, 255), 4)
-        cv2.circle(img_copy, center_pt, 8, (255, 255, 0), -1)
-        cv2.circle(img_copy, tip1_pt, 10, (0, 255, 0), -1)
-        cv2.circle(img_copy, tip2_pt, 10, (0, 0, 255), -1)
+        cv2.circle(img_copy, center_pt, 8, (255, 0, 0), -1)
+        cv2.circle(img_copy, tip1_pt, 8, (0, 255, 0), -1)
+        cv2.circle(img_copy, tip2_pt, 8, (0, 0, 255), -1)
         
-        cv2.putText(img_copy, "H", (tip1_pt[0]+10, tip1_pt[1]+10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 3)
-        cv2.putText(img_copy, "M", (tip2_pt[0]+10, tip2_pt[1]+10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 3)
-        cv2.putText(img_copy, f"H: {a1:.1f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-        cv2.putText(img_copy, f"M: {a2:.1f}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+        return self._resize_small(img_copy)
+
+    # --- [C3] ANGLE VISUALIZATION (With Text) ---
+    def _draw_angles_on_img(self, img, center, tip1, tip2, a1, a2):
+        img_copy = img.copy()
+        center_pt = (int(center[0]), int(center[1]))
+        tip1_pt = (int(tip1[0]), int(tip1[1]))
+        tip2_pt = (int(tip2[0]), int(tip2[1]))
+        
+        cv2.line(img_copy, center_pt, tip1_pt, (0, 255, 0), 4)
+        cv2.line(img_copy, center_pt, tip2_pt, (0, 0, 255), 4)
+        cv2.circle(img_copy, center_pt, 8, (255, 0, 0), -1)
+        cv2.circle(img_copy, tip1_pt, 8, (0, 255, 0), -1)
+        cv2.circle(img_copy, tip2_pt, 8, (0, 0, 255), -1)
+        
+        # TEXT
+        cv2.putText(img_copy, f"H: {a1:.1f}", (10, 30), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+        cv2.putText(img_copy, f"M: {a2:.1f}", (10, 60), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
         
         return self._resize_small(img_copy)
 
@@ -287,9 +292,9 @@ class HARPEngine:
         visualizations = {}
 
         # --- [C1] LOCALIZATION (Runs dynamically for both modes now) ---
-        target_crop, found_object, bbox, c1_detected_type = self._localize_object(img_array)
+        c_crop, c_bbox, c_conf, g_crop, g_bbox, g_conf = self._localize_all(img_array)
         
-        if not found_object:
+        if c_conf == -1.0 and g_conf == -1.0:
             debug_info.append(f"C1: No Object Found - Stopping")
             visualizations['c1_detection'] = self._resize_small(img_array.copy())
             return {
@@ -304,38 +309,38 @@ class HARPEngine:
                 "error": f"No Object Detected"
             }
 
+        c1_detected_type = 'clock' if c_conf > g_conf else 'gauge'
         debug_info.append(f"C1: Initial guess is {c1_detected_type.capitalize()}")
 
-        # --- [C2] CROSS-VALIDATION ---
-        # Instead of trusting C1 natively, we use C2 Specialists to validate presence of keypoints
+        # --- [C2] CROSS-VALIDATION (Fixed Isolated Crops) ---
         c2_clock_conf = 0.0
         c2_gauge_conf = 0.0
         clock_kpts, gauge_kpts = None, None
-        clock_kpts_data, gauge_kpts_data = None, None
         
-        if self.c2_clock_model:
-            c_res = self.c2_clock_model(target_crop, verbose=False)[0]
+        if self.c2_clock_model and c_crop is not None:
+            c_res = self.c2_clock_model(c_crop, verbose=False)[0]
             if c_res.keypoints and len(c_res.keypoints.data) > 0:
                 kpts = c_res.keypoints.data[0].cpu().numpy()
                 if len(kpts) >= 3:
-                    c2_clock_conf = np.mean(kpts[:3, 2]) # Average confidence of keypoints
+                    c2_clock_conf = np.mean(kpts[:3, 2])
                     clock_kpts = kpts
-                    clock_kpts_data = c_res.keypoints
                     
-        if self.c2_gauge_model:
-            g_res = self.c2_gauge_model(target_crop, verbose=False)[0]
+        if self.c2_gauge_model and g_crop is not None:
+            g_res = self.c2_gauge_model(g_crop, verbose=False)[0]
             if g_res.keypoints and len(g_res.keypoints.data) > 0:
                 kpts = g_res.keypoints.data[0].cpu().numpy()
                 if len(kpts) >= 4:
-                    c2_gauge_conf = np.mean(kpts[:4, 2]) # Average confidence of keypoints
+                    c2_gauge_conf = np.mean(kpts[:4, 2])
                     gauge_kpts = kpts
-                    gauge_kpts_data = g_res.keypoints
 
         if c2_clock_conf == 0.0 and c2_gauge_conf == 0.0:
              return {"error": "C2 Failed: Neither clock hands nor gauge skeleton found in the crop."}
              
         # The true type is whichever C2 model is more confident about its keypoints
         detected_type = 'clock' if c2_clock_conf > c2_gauge_conf else 'gauge'
+        target_crop = c_crop if detected_type == 'clock' else g_crop
+        bbox = c_bbox if detected_type == 'clock' else g_bbox
+        
         debug_info.append(f"C2 Validation: Chose {detected_type.capitalize()} (Clock KP Conf: {c2_clock_conf:.2f}, Gauge KP Conf: {c2_gauge_conf:.2f})")
 
         visualizations['c1_detection'] = self._draw_bbox(img_array, bbox, detected_type)
@@ -428,8 +433,8 @@ class HARPEngine:
             a1 = self._get_angle(center, tip1)
             a2 = self._get_angle(center, tip2)
             
-            visualizations['c2_skeleton'] = self._draw_clock_angles(target_crop, center, tip1, tip2, a1, a2)
-            visualizations['c3_angles'] = visualizations['c2_skeleton']
+            visualizations['c2_skeleton'] = self._draw_skeleton(target_crop, center, tip1, tip2)
+            visualizations['c3_angles'] = self._draw_angles_on_img(target_crop, center, tip1, tip2, a1, a2)
             
             h, m, error = self._solve_physics(a1, a2)
             
@@ -490,7 +495,7 @@ class HARPEngine:
                         refined_angles.append((rough_angle + delta) % 360)
 
                 visualizations['c3_crops'] = c3_crops
-                visualizations['c3_angles'] = self._draw_clock_angles(target_crop, center, tip1, tip2, refined_angles[0], refined_angles[1])
+                visualizations['c3_angles'] = self._draw_angles_on_img(target_crop, center, tip1, tip2, refined_angles[0], refined_angles[1])
                 
                 h_new, m_new, err_new = self._solve_physics(refined_angles[0], refined_angles[1])
                 
