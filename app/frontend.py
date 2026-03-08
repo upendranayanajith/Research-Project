@@ -91,10 +91,11 @@ class ClockProcessor(VideoProcessorBase):
         if self.frame_count % 5 == 0:
             try:
                 self.last_result = self.engine.analyze(
-                    img, 
+                    img,
                     force_expert=self.force_expert,
                     manual_min_val=self.manual_min_val,
-                    manual_max_val=self.manual_max_val
+                    manual_max_val=self.manual_max_val,
+                    enable_temporal=True,   # [Tier 1.4] Kalman smoothing in live mode
                 )
             except Exception as e:
                 print(f"AI Error: {e}")
@@ -118,6 +119,15 @@ class ClockProcessor(VideoProcessorBase):
                 cv2.putText(img, f"H:{a1:.0f} M:{a2:.0f}", (50, 190), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
 
         cv2.putText(img, f"FPS: {self.fps}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
+        # [Tier 1.4] Temporal stability indicator
+        if self.last_result:
+            tx = self.last_result.get("temporal_xai")
+            if tx and tx.get("status") == "Active":
+                trend = tx.get("trend", "")
+                stab = tx.get("stability_score", 0)
+                t_color = (0, 200, 0) if stab > 75 else (0, 200, 200) if stab > 40 else (0, 0, 255)
+                cv2.putText(img, f"Kalman: {trend} ({stab:.0f}%)", (20, 70),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, t_color, 1)
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
 # ==========================================
@@ -196,9 +206,77 @@ def display_results(data):
             for idx, (col, crop) in enumerate(zip(c_cols, viz["c3_crops"])):
                 col.image(base64.b64decode(crop), width=100)
             if data.get("heatmap_b64"):
-                st.markdown(f"**{icon('opacity')} Attention Map (Grad-CAM)**", unsafe_allow_html=True)
+                st.markdown(f"**{icon('opacity')} Attention Map (GradCAM++)**", unsafe_allow_html=True)
                 st.image(base64.b64decode(data["heatmap_b64"]), width=300)
-        else: st.info("Expert AI skipped (Fast Path or Gauge Mode used).")
+
+            # --- AI Insight Explanations (Gemini or LocalExplainer) ---
+            debug_lines = res.get("debug", [])
+            insight_lines = [l for l in debug_lines if "AI Insight" in l]
+            uncertainty_lines = [l for l in debug_lines if "uncertainty" in l.lower() or "alpha" in l.lower()]
+
+            if insight_lines:
+                st.markdown("---")
+                st.markdown(f"**{icon('psychology')} AI Model Explanations**", unsafe_allow_html=True)
+                for line in insight_lines:
+                    # Strip the "AI Insight Hand X: " prefix for clean display
+                    label, _, text = line.partition(": ")
+                    hand_label = label.replace("AI Insight ", "")
+                    is_local = "[Local XAI]" in text
+                    is_gemini = "[Gemini]" in text
+                    badge = "🔵 Local" if is_local else "✨ Gemini" if is_gemini else "ℹ️"
+                    clean_text = text.replace("[Local XAI] ", "").replace("[Gemini] ", "")
+                    st.info(f"**{badge} — {hand_label}:** {clean_text}")
+            else:
+                st.markdown("---")
+                st.info("💡 AI Explanation: Enable **Force Expert Path** and re-run to generate model explanations.")
+
+            # --- Uncertainty & Confidence ---
+            if uncertainty_lines or res.get("uncertainty_deg"):
+                st.markdown(f"**{icon('bar_chart')} C3 Uncertainty**", unsafe_allow_html=True)
+                unc_val = res.get("uncertainty_deg", "N/A")
+                if unc_val and unc_val != "N/A":
+                    st.success(f"**MC Dropout Uncertainty:** {unc_val}")
+                for line in uncertainty_lines:
+                    st.caption(f"🔢 {line}")
+
+            # --- Collapsible Debug Log ---
+            with st.expander("🔍 Full Pipeline Debug Log", expanded=False):
+                for line in debug_lines:
+                    icon_char = "✅" if "Accepted" in line or "Gemini API" in line or "Manual" in line else \
+                                "⚠️" if "Rejected" in line or "Failed" in line else \
+                                "🔵" if "alpha" in line.lower() or "uncertainty" in line.lower() else "▪️"
+                    st.markdown(f"{icon_char} `{line}`")
+
+            # --- [Tier 1.4] Temporal Stability Panel ---
+            temporal_xai = res.get("temporal_xai")
+            if temporal_xai:
+                st.markdown("---")
+                st.markdown(
+                    f"**{icon('bar_chart')} 📈 Temporal Stability (Kalman Filter)**",
+                    unsafe_allow_html=True,
+                )
+                t_status = temporal_xai.get("status", "N/A")
+                if t_status == "Initialising":
+                    st.info(temporal_xai.get("message", "Kalman filter warming up..."))
+                elif t_status == "Active":
+                    t_cols = st.columns(4)
+                    t_cols[0].metric('Stability', f"{temporal_xai.get('stability_score', 'N/A')}%")
+                    t_cols[1].metric('Trend', temporal_xai.get('trend', 'N/A'))
+                    t_cols[2].metric('Spikes Rejected', temporal_xai.get('total_spike_count', 0))
+                    t_cols[3].metric('Avg Correction', f"{temporal_xai.get('mean_kalman_correction_deg', 0):.1f}°")
+                    st.caption(f"🔢 {temporal_xai.get('message', '')}")
+                    with st.expander("Variance Details"):
+                        st.json({
+                            "hand1_variance_deg": temporal_xai.get("hand1_variance_deg"),
+                            "hand2_variance_deg": temporal_xai.get("hand2_variance_deg"),
+                            "spike_rate_per_frame": temporal_xai.get("spike_rate_per_frame"),
+                            "frames_seen": temporal_xai.get("frames_seen"),
+                        })
+            else:
+                st.caption("📈 Temporal Stability: N/A (only active in Live Webcam / RTSP mode)")
+        else:
+            st.info("Expert AI skipped (Fast Path or Gauge Mode used). Enable 'Force Expert Path' to activate C3 + XAI.")
+
     with tab4:
         st.markdown(f"# {icon('schedule')} {res['time']}", unsafe_allow_html=True)
         st.markdown(f"**Reasoning:** `{res.get('reasoning', 'N/A')}`")
@@ -425,10 +503,11 @@ elif st.session_state.page == "webcam":
                         # We must copy the frame because Streamlit/AI shouldn't modify the thread's raw array directly
                         frame_for_ai = frame.copy() 
                         last_result = st.session_state.ip_cam_engine.analyze(
-                            frame_for_ai, 
+                            frame_for_ai,
                             force_expert=st.session_state.ip_cam_expert,
                             manual_min_val=st.session_state.ip_cam_manual_min,
-                            manual_max_val=st.session_state.ip_cam_manual_max
+                            manual_max_val=st.session_state.ip_cam_manual_max,
+                            enable_temporal=True,   # [Tier 1.4]
                         )
                     except Exception as e:
                         print(f"AI Error: {e}")

@@ -87,7 +87,7 @@ class MetricsTracker:
         self._initialized = True
 
     def _init_db(self):
-        """Initialize the SQLite database and table"""
+        """Initialize the SQLite database and table (migration-safe)."""
         try:
             with sqlite3.connect(self.db_path) as conn:
                 conn.execute("""
@@ -100,21 +100,40 @@ class MetricsTracker:
                         success INTEGER,
                         confidence TEXT,
                         components_used TEXT,
-                        error_msg TEXT
+                        error_msg TEXT,
+                        angle_correction_deg REAL
                     )
                 """)
+                # [FIX-7] Migration: add column if upgrading from an older schema
+                try:
+                    conn.execute(
+                        "ALTER TABLE analytics ADD COLUMN angle_correction_deg REAL"
+                    )
+                except Exception:
+                    pass  # Column already exists
         except Exception as e:
             print(f"⚠️ Warning: Database initialization failed: {e}")
 
-    def record_analysis(self, result: Dict, processing_time: float, image_name: str = ""):
-        """Insert a new record into the database"""
+    def record_analysis(
+        self,
+        result: Dict,
+        processing_time: float,
+        image_name: str = "",
+        angle_correction_deg: float = None,
+    ):
+        """Insert a new record into the database.
+
+        Args:
+            angle_correction_deg: [FIX-7] Absolute C3 correction magnitude in degrees,
+                                  or None if C3 was not used.
+        """
         try:
-            timestamp = datetime.now().isoformat()
-            method = result.get("method", "Unknown")
-            success = 1 if "error" not in result else 0
+            timestamp  = datetime.now().isoformat()
+            method     = result.get("method", "Unknown")
+            success    = 1 if not result.get("error") else 0
             confidence = str(result.get("confidence", "Unknown"))
-            error_msg = str(result.get("error", ""))
-            
+            error_msg  = str(result.get("error", ""))
+
             comps = []
             if "C1" in method: comps.append("C1")
             if "C2" in method: comps.append("C2")
@@ -123,11 +142,18 @@ class MetricsTracker:
             components_json = json.dumps(comps)
 
             with sqlite3.connect(self.db_path) as conn:
-                conn.execute("""
-                    INSERT INTO analytics 
-                    (timestamp, image_name, processing_time, method, success, confidence, components_used, error_msg)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """, (timestamp, image_name, processing_time, method, success, confidence, components_json, error_msg))
+                conn.execute(
+                    """
+                    INSERT INTO analytics
+                    (timestamp, image_name, processing_time, method, success,
+                     confidence, components_used, error_msg, angle_correction_deg)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        timestamp, image_name, processing_time, method, success,
+                        confidence, components_json, error_msg, angle_correction_deg
+                    ),
+                )
         except Exception as e:
             print(f"⚠️ Failed to record metric: {e}")
 
@@ -166,7 +192,7 @@ class MetricsTracker:
                     "avg_processing_time": avg_time,
                     "method_usage": method_usage,
                     "component_usage": comp_usage,
-                    "uptime": 0
+                    "uptime": 0,
                 }
         except Exception as e:
             print(f"Error fetching metrics: {e}")
@@ -180,6 +206,35 @@ class MetricsTracker:
                 return [dict(row) for row in cursor.fetchall()]
         except:
             return []
+
+    def get_c3_stats(self) -> Dict:
+        """[FIX-7] Returns C3-specific performance statistics."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                total = conn.execute(
+                    "SELECT COUNT(*) FROM analytics"
+                ).fetchone()[0]
+
+                c3_rows = conn.execute(
+                    "SELECT COUNT(*), AVG(angle_correction_deg) FROM analytics "
+                    "WHERE angle_correction_deg IS NOT NULL"
+                ).fetchone()
+                c3_count   = c3_rows[0] or 0
+                avg_correction = round(c3_rows[1], 3) if c3_rows[1] is not None else None
+
+                c3_trigger_rate = round((c3_count / total * 100), 2) if total > 0 else 0.0
+
+            return {
+                "c3_activations":        c3_count,
+                "c3_trigger_rate_pct":   c3_trigger_rate,
+                "avg_correction_deg":    avg_correction,
+                "description": (
+                    "avg_correction_deg is the mean absolute angle correction C3 applied "
+                    "across all expert-path analyses."
+                ),
+            }
+        except Exception as e:
+            return {"error": str(e)}
 
     def clear_metrics(self):
         try:

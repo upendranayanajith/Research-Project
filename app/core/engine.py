@@ -9,6 +9,7 @@ from ultralytics import YOLO
 from PIL import Image
 from app.core.xai import XaiVisualizer, SemanticExplainer
 from app.core.metrics import calculate_gauge_reading, calculate_gauge_reading_advanced
+from app.core.temporal import TemporalTracker   # [Tier 1.4] Temporal Consistency
 import google.generativeai as genai
 import easyocr
 from dotenv import load_dotenv
@@ -53,8 +54,9 @@ class HARPEngine:
         if os.path.exists(self.c3_path):
             self.c3_model.load_state_dict(torch.load(self.c3_path, map_location=self.device))
             self.c3_model.eval()
-            self.xai = XaiVisualizer(self.c3_model[0]) 
+            self.xai = XaiVisualizer(self.c3_model[0])
             self.explainer = SemanticExplainer()
+            print("✅ C3 + XAI (GradCAM++) Loaded.")
         else:
             print("⚠️ WARNING: C3 weights not found.")
             self.c3_model = None
@@ -62,6 +64,14 @@ class HARPEngine:
         
         print("Loading EasyOCR Fallback...")
         self.reader = easyocr.Reader(['en'], gpu=torch.cuda.is_available())
+
+        # --- [Tier 1.4] TEMPORAL CONSISTENCY (Kalman Filter) ---
+        self.temporal_tracker = TemporalTracker(
+            process_noise=1.5,
+            measurement_noise=5.0,
+            spike_threshold=45.0,
+        )
+        print("✅ Temporal Tracker (Kalman) Initialized.")
 
     def _load_yolo(self, path, name):
         try:
@@ -77,6 +87,107 @@ class HARPEngine:
         model.fc = nn.Linear(num_ftrs, 1)
         model = nn.Sequential(model, nn.Sigmoid())
         return model
+
+    def _get_c3_arch_circular(self):
+        """
+        [FIX-1 FUTURE] Circular regression head: outputs (sin, cos) instead of
+        a sigmoid scalar, resolving the 0°/360° wraparound ambiguity.
+        Requires retraining — kept disabled by default (use_circular=False).
+        Decoder: angle = atan2(sin_out, cos_out) * (180/pi) % 360
+        """
+        model = models.resnet18(weights=None)
+        num_ftrs = model.fc.in_features
+        model.fc = nn.Linear(num_ftrs, 2)   # Two outputs: sin, cos
+        # No Sigmoid — raw linear outputs fed to atan2
+        return model
+
+    def _enable_dropout(self):
+        """Sets all Dropout layers in c3_model to train mode (enables stochastic dropout)."""
+        for m in self.c3_model.modules():
+            if isinstance(m, nn.Dropout):
+                m.train()
+
+    def _predict_with_uncertainty(self, tensor: torch.Tensor, n_passes: int = 20):
+        """
+        [FIX-3] Monte Carlo Dropout uncertainty estimation.
+        Temporarily enables dropout during inference for N stochastic forward passes.
+
+        Returns:
+            mean_angle_deg (float): Average predicted angle across all passes.
+            std_deg        (float): Standard deviation — proxy for model uncertainty.
+        """
+        if self.c3_model is None:
+            return 0.0, 0.0
+
+        # Switch to eval (disables BN randomness) but keep dropout active
+        self.c3_model.eval()
+        self._enable_dropout()
+
+        preds = []
+        with torch.no_grad():
+            for _ in range(n_passes):
+                pred = self.c3_model(tensor).item()  # sigmoid → [0,1]
+                preds.append(pred * 360.0)            # → degrees
+
+        # Restore full eval mode
+        self.c3_model.eval()
+
+        mean_angle = float(np.mean(preds))
+        std_deg    = float(np.std(preds))
+
+        # Store for surface in result dict
+        if not hasattr(self, '_last_uncertainties'):
+            self._last_uncertainties = []
+        self._last_uncertainties.append(std_deg)
+
+        return mean_angle, std_deg
+
+    # [FIX-5] Gauge C3 needle refinement
+    GAUGE_C3_DELTA_THRESHOLD = 15.0  # degrees — tighter than clock (15° vs 20°)
+
+    def _refine_gauge_needle_angle(self, crop, center, tip, rough_angle: float):
+        """
+        [FIX-5] Applies C3 angle regression to refine the gauge needle angle.
+        Uses the same trained clock model (transfer from clock domain).
+        The rotation-normalise-crop pipeline is identical to the clock hand path.
+
+        Args:
+            crop:        The gauge crop image (BGR ndarray).
+            center:      (x, y) of gauge center keypoint.
+            tip:         (x, y) of needle tip keypoint.
+            rough_angle: Geometric angle computed from C2 keypoints.
+
+        Returns:
+            refined_angle (float): C3-refined needle angle.
+            delta         (float): Correction applied (0 if rejected or C3 unavailable).
+            uncertainty   (float): Std deviation from MC Dropout passes.
+            accepted      (bool):  Whether C3 correction was accepted.
+        """
+        if self.c3_model is None:
+            return rough_angle, 0.0, 0.0, False
+
+        hand_crop = self._get_crop(crop, center, rough_angle)
+        if hand_crop is None or hand_crop.size == 0:
+            return rough_angle, 0.0, 0.0, False
+
+        try:
+            pil_crop    = Image.fromarray(cv2.cvtColor(hand_crop, cv2.COLOR_BGR2RGB))
+            pil_resized = pil_crop.resize((64, 64))
+            t_input     = self.c3_transform(pil_resized).unsqueeze(0).to(self.device)
+
+            c3_angle, uncertainty_std = self._predict_with_uncertainty(t_input)
+            delta = c3_angle - 360 if c3_angle > 180 else c3_angle
+
+            if abs(delta) > self.GAUGE_C3_DELTA_THRESHOLD:
+                return rough_angle, delta, uncertainty_std, False
+
+            # Soft weighted blend (same alpha logic as clock path)
+            alpha   = float(np.clip(1.0 - (uncertainty_std / 20.0), 0.0, 1.0))
+            blended = (alpha * (rough_angle + delta) + (1.0 - alpha) * rough_angle) % 360
+            return blended, delta, uncertainty_std, True
+
+        except Exception:
+            return rough_angle, 0.0, 0.0, False
 
     def _get_angle(self, center, point):
         dx, dy = point[0] - center[0], point[1] - center[1]
@@ -111,31 +222,51 @@ class HARPEngine:
         """Helper to force 500x500px output for dashboard efficiency"""
         return cv2.resize(img, (500, 500), interpolation=cv2.INTER_LINEAR)
 
-    def _infer_ampm(self, crop):
-        if crop is None or crop.size == 0: return "Unknown", 0.0
-        
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
-            return "Unknown (Missing API Key)", 0.0
-            
-        try:
-            genai.configure(api_key=api_key)
-            pil_img = Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
-            model = genai.GenerativeModel('gemini-2.5-flash')
-            
-            prompt = "Look at this cropped image of a clock. Based on the lighting, shadows, colors, and overall ambiance, guess whether this photo was taken during the day (AM) or night (PM). Return ONLY 'AM' or 'PM'."
-            
-            response = model.generate_content([prompt, pil_img])
-            text = response.text.strip().upper()
-            
-            if "AM" in text:
-                return "AM", 0.9
-            elif "PM" in text:
-                return "PM", 0.9
-            else:
-                return "Unknown", 0.5
-        except Exception as e:
+    def _infer_ampm_local(self, crop) -> tuple:
+        """
+        [FIX-6] API-free AM/PM heuristic using mean brightness (HSV V-channel).
+        Bright image → likely daytime → AM.  Dark image → likely night → PM.
+        Confidence 0.6 reflects that this is a heuristic, not a trained classifier.
+        """
+        if crop is None or crop.size == 0:
             return "Unknown", 0.0
+        hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+        mean_brightness = float(np.mean(hsv[:, :, 2]))  # V channel, 0-255
+        if mean_brightness > 128:
+            return "AM", 0.6
+        else:
+            return "PM", 0.6
+
+    def _infer_ampm(self, crop):
+        """Primary: Gemini Vision API. Fallback: local brightness heuristic."""
+        if crop is None or crop.size == 0:
+            return "Unknown", 0.0
+
+        api_key = os.getenv("GEMINI_API_KEY")
+        if api_key:
+            try:
+                genai.configure(api_key=api_key)
+                pil_img = Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
+                model = genai.GenerativeModel('gemini-2.5-flash')
+                prompt = (
+                    "Look at this cropped image of a clock. Based on the lighting, "
+                    "shadows, colors, and overall ambiance, guess whether this photo "
+                    "was taken during the day (AM) or night (PM). Return ONLY 'AM' or 'PM'."
+                )
+                response = model.generate_content([prompt, pil_img])
+                text = response.text.strip().upper()
+                if "AM" in text:
+                    return "AM", 0.9
+                elif "PM" in text:
+                    return "PM", 0.9
+                else:
+                    return "Unknown", 0.5
+            except Exception:
+                pass  # Fall through to local heuristic
+
+        # [FIX-6] Local brightness fallback
+        result, conf = self._infer_ampm_local(crop)
+        return result, conf
 
     def _resolve_ambiguity(self, a1, a2, h, m):
         diff = min((a1 - a2) % 360, (a2 - a1) % 360)
@@ -349,9 +480,11 @@ class HARPEngine:
 
         return self._resize_small(img_copy)
 
-    def analyze(self, img_array, force_expert=False, manual_min_val="", manual_max_val="", device_time_str=None):
+    def analyze(self, img_array, force_expert=False, manual_min_val="", manual_max_val="",
+                device_time_str=None, enable_temporal=False):
         debug_info = []
         visualizations = {}
+        self._last_uncertainties = []  # [FIX-3] Reset per-analysis uncertainty log
 
         # --- [C1] LOCALIZATION (Runs dynamically for both modes now) ---
         c_crop, c_bbox, c_conf, g_crop, g_bbox, g_conf = self._localize_all(img_array)
@@ -452,21 +585,39 @@ class HARPEngine:
             
             a_min = self._get_angle(center, min_pt)
             a_max = self._get_angle(center, max_pt)
-            a_tip = self._get_angle(center, tip)
-            span = (a_max - a_min + 360) % 360
-            needle = (a_tip - a_min + 360) % 360
+            a_tip_raw = self._get_angle(center, tip)
+
+            # --- [FIX-5] C3 Gauge Needle Refinement ---
+            refined_tip_angle, c3_delta, c3_unc, c3_accepted = self._refine_gauge_needle_angle(
+                target_crop, center, tip, a_tip_raw
+            )
+            if c3_accepted:
+                debug_info.append(
+                    f"Gauge C3: needle refined {a_tip_raw:.1f}° → {refined_tip_angle:.1f}° "
+                    f"(delta={c3_delta:.1f}°, uncertainty=±{c3_unc:.1f}°)"
+                )
+            else:
+                debug_info.append(
+                    f"Gauge C3: needle kept at {a_tip_raw:.1f}° (C3 correction rejected or unavailable)"
+                )
+                refined_tip_angle = a_tip_raw
+
+            span   = (a_max - a_min + 360) % 360
+            needle = (refined_tip_angle - a_min + 360) % 360
             
             units_per_deg = 0.0
             # C4 Physics Logic 
             if min_val is not None and max_val is not None and min_val <= max_val:
                 reading, units_per_deg = calculate_gauge_reading_advanced(span, needle, min_val, max_val)
                 time_str = str(reading)
-                method_str = "Advanced Gauge Reading (C1+C2+OCR+C4)"
+                c3_tag = "+C3" if c3_accepted else ""
+                method_str = f"Advanced Gauge Reading (C1+C2{c3_tag}+OCR+C4)"
                 reasoning_str = f"Gauge Logic: 1° = {units_per_deg:.4f} units. Formula: {min_val} + ({needle:.1f}° * {units_per_deg:.4f}) = {reading}"
             else:
                 reading = calculate_gauge_reading([center, min_pt, max_pt, tip])
                 time_str = f"{reading}%"
-                method_str = "Gauge Reading - Fallback (C1+C2+C4)"
+                c3_tag = "+C3" if c3_accepted else ""
+                method_str = f"Gauge Reading - Fallback (C1+C2{c3_tag}+C4)"
                 reasoning_str = "Gauge Logic: OCR extraction failed. Interpreted raw percentage. Please use 'Manual Gauge Scale Overrides' in settings."
 
             visualizations['c2_skeleton'] = self._draw_gauge_skeleton(target_crop, center, min_pt, max_pt, tip, parsed_min, parsed_max)
@@ -479,7 +630,7 @@ class HARPEngine:
                 "heatmap": None,
                 "debug": debug_info + [f"Final Reading: {time_str}"],
                 "visualizations": visualizations,
-                "angles": {"span": span, "needle": needle, "units_per_deg": units_per_deg},
+                "angles": {"span": span, "needle": needle, "units_per_deg": units_per_deg, "needle_raw": a_tip_raw, "c3_accepted": c3_accepted},
                 "scale": {"min": parsed_min, "max": parsed_max},
                 "reasoning": reasoning_str,
                 "error": ""
@@ -498,6 +649,23 @@ class HARPEngine:
             visualizations['c2_skeleton'] = self._draw_skeleton(target_crop, center, tip1, tip2)
             visualizations['c3_angles'] = self._draw_angles_on_img(target_crop, center, tip1, tip2, a1, a2)
             
+            # [Tier 1.4] Temporal Consistency — apply Kalman smoothing
+            if enable_temporal:
+                a1_raw, a2_raw = a1, a2
+                a1, a2, spike_info = self.temporal_tracker.update(a1, a2)
+                temporal_xai = self.temporal_tracker.get_temporal_xai()
+                if spike_info["spikes_this_frame"]:
+                    debug_info.append(
+                        f"Temporal: Spike rejected on {spike_info['spikes_this_frame']} "
+                        f"(keeping prev smoothed angle)"
+                    )
+                debug_info.append(
+                    f"Temporal: Kalman smoothed H={a1:.1f}\u00b0 (was {a1_raw:.1f}\u00b0), "
+                    f"M={a2:.1f}\u00b0 (was {a2_raw:.1f}\u00b0)"
+                )
+            else:
+                temporal_xai = None
+
             h, m, error = self._solve_physics(a1, a2)
             
             ampm_status, ampm_conf = self._infer_ampm(img_array)
@@ -525,6 +693,8 @@ class HARPEngine:
                 }
             
             # --- [C3] CLOCK EXPERT PATH ---
+            # [FIX-3] MC Dropout uncertainty estimation
+            # [FIX-4] Adaptive confidence-weighted delta fusion
             else:
                 if self.c3_model is None:
                     return {"time": f"{h}:{m:02d}", "method": "Fast Path (C3 Missing)", "visualizations": visualizations, "angles": {"hand1": a1, "hand2": a2}}
@@ -539,33 +709,48 @@ class HARPEngine:
                         refined_angles.append(rough_angle)
                         continue
                     c3_crops.append(crop)
-                    
+
                     pil_crop = Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
                     pil_resized = pil_crop.resize((64, 64))
                     t_input = self.c3_transform(pil_resized).unsqueeze(0).to(self.device)
-                    
-                    norm_crop = np.array(pil_resized, dtype=np.float32) / 255.0
-                    hand_heatmap = self.xai.generate(t_input, norm_crop)
-                    heatmaps.append(hand_heatmap)
 
-                    with torch.no_grad():
-                        pred = self.c3_model(t_input).item()
-                    
-                    c3_angle = pred * 360.0
+                    norm_crop = np.array(pil_resized, dtype=np.float32) / 255.0
+                    # [FIX-1] xai.generate now returns (visualization, raw_heatmap)
+                    hand_heatmap_vis, raw_heatmap = self.xai.generate(t_input, norm_crop)
+                    heatmaps.append(hand_heatmap_vis)
+
+                    # [FIX-3] MC Dropout uncertainty estimation
+                    c3_angle, uncertainty_std = self._predict_with_uncertainty(t_input)
                     delta = c3_angle - 360 if c3_angle > 180 else c3_angle
-                    
-                    if self.explainer and force_expert:
+
+                    # Always generate LocalExplainer output (no API needed).
+                    # Gemini semantic explanation only fires when force_expert=True.
+                    if self.explainer:
                         explanation = self.explainer.explain(
-                            crop, hand_heatmap, c3_angle, hand_type=f"Hand {i+1}"
+                            crop, hand_heatmap_vis, c3_angle,
+                            hand_type=f"Hand {i+1}",
+                            raw_heatmap=raw_heatmap,
+                            use_gemini=force_expert,   # Gemini only on explicit expert mode
                         )
                         debug_info.append(f"AI Insight Hand {i+1}: {explanation}")
 
+                    debug_info.append(
+                        f"Hand {i+1}: C3 delta={delta:.1f}°, uncertainty=±{uncertainty_std:.1f}°"
+                    )
+
+                    # [FIX-4] Adaptive confidence-weighted delta fusion
+                    # alpha=1.0 → fully trust C3; alpha=0.0 → fully keep C2 geometry
+                    alpha = float(np.clip(1.0 - (uncertainty_std / 20.0), 0.0, 1.0))
                     if abs(delta) > 20.0:
-                        debug_info.append(f"Hand {i}: Rejected C3 delta {delta:.1f}°")
+                        # Emergency cap: C3 is too far off — discard
+                        debug_info.append(f"Hand {i+1}: C3 delta exceeds cap — keeping C2 angle.")
                         refined_angles.append(rough_angle)
                     else:
-                        debug_info.append(f"Hand {i}: Accepted C3 delta {delta:.1f}°")
-                        refined_angles.append((rough_angle + delta) % 360)
+                        blended = (alpha * (rough_angle + delta) + (1.0 - alpha) * rough_angle) % 360
+                        debug_info.append(
+                            f"Hand {i+1}: alpha={alpha:.2f} → blended={blended:.1f}°"
+                        )
+                        refined_angles.append(blended)
 
                 if len(heatmaps) == 2:
                     heatmap_img = np.hstack((heatmaps[0], heatmaps[1]))
@@ -573,10 +758,38 @@ class HARPEngine:
                     heatmap_img = heatmaps[0]
                 else:
                     heatmap_img = None
+
+                # Surface uncertainty in result
+                uncertainty_summary = ", ".join(
+                    [f"H{j+1}=±{self._last_uncertainties[j]:.1f}°"
+                     for j in range(len(self._last_uncertainties))]
+                ) if hasattr(self, '_last_uncertainties') else "N/A"
                 
                 visualizations['c3_crops'] = c3_crops
                 visualizations['c3_angles'] = self._draw_angles_on_img(target_crop, center, tip1, tip2, refined_angles[0], refined_angles[1])
                 
+                # [Tier 1.4] Temporal Consistency on expert-refined angles
+                if enable_temporal:
+                    unc_values = list(self._last_uncertainties)
+                    u1 = unc_values[0] if len(unc_values) > 0 else None
+                    u2 = unc_values[1] if len(unc_values) > 1 else None
+                    ra0_raw, ra1_raw = refined_angles[0], refined_angles[1]
+                    ref0, ref1, spike_info_exp = self.temporal_tracker.update(
+                        refined_angles[0], refined_angles[1], u1, u2
+                    )
+                    refined_angles = [ref0, ref1]
+                    temporal_xai = self.temporal_tracker.get_temporal_xai()
+                    if spike_info_exp["spikes_this_frame"]:
+                        debug_info.append(
+                            f"Temporal (Expert): Spike on {spike_info_exp['spikes_this_frame']} rejected."
+                        )
+                    debug_info.append(
+                        f"Temporal (Expert): Kalman H={ref0:.1f}\u00b0 (was {ra0_raw:.1f}\u00b0), "
+                        f"M={ref1:.1f}\u00b0 (was {ra1_raw:.1f}\u00b0)"
+                    )
+                else:
+                    temporal_xai = None
+
                 h_new, m_new, err_new = self._solve_physics(refined_angles[0], refined_angles[1])
                 
                 ambiguity_warning_expert = self._resolve_ambiguity(refined_angles[0], refined_angles[1], h_new, m_new)
@@ -596,7 +809,10 @@ class HARPEngine:
                     "error": "",
                     "ampm": ampm_status,
                     "drift": drift_str_expert,
-                    "ambiguity": ambiguity_warning_expert or ambiguity_warning
+                    "ambiguity": ambiguity_warning_expert or ambiguity_warning,
+                    "uncertainty_deg": uncertainty_summary,
+                    "xai_method": "GradCAM++ (multi-layer)",
+                    "temporal_xai": temporal_xai,
                 }
 
 # Alias mapping so you don't break existing `main.py` imports 

@@ -60,9 +60,23 @@ async def analyze_image(
     )
     
     processing_time = time.time() - start_time
-    
+
+    # [FIX-7] Extract C3 angle correction magnitude for tracking
+    angles_info = result.get("angles", {})
+    correction_deg = None
+    if "hand1" in angles_info and result.get("method", "").startswith("Expert"):
+        # Compute from uncertainty_deg if available, else leave None
+        uncertainty_str = result.get("uncertainty_deg", "")
+        if uncertainty_str and uncertainty_str != "N/A":
+            try:
+                # Parse first hand uncertainty e.g. "H1=±3.2°, H2=±1.1°"
+                first_part = uncertainty_str.split(",")[0]
+                correction_deg = float(first_part.split("±")[1].replace("°", "").strip())
+            except Exception:
+                pass
+
     # [C4] Log to Database
-    metrics_tracker.record_analysis(result, processing_time, file.filename)
+    metrics_tracker.record_analysis(result, processing_time, file.filename, correction_deg)
     
     if "error" in result and result["error"]:
         return {"result": result, "processing_time": processing_time}
@@ -202,6 +216,11 @@ async def analyze_batch(
 @app.get("/metrics")
 async def get_metrics():
     return metrics_tracker.get_metrics()
+
+@app.get("/metrics/c3")
+async def get_c3_metrics():
+    """[FIX-8] C3-specific performance statistics: trigger rate and avg correction."""
+    return metrics_tracker.get_c3_stats()
 
 @app.get("/metrics/history")
 async def get_metrics_history():
