@@ -13,6 +13,7 @@ import numpy as np
 import time
 import sys
 import os
+import threading
 
 # --- PATH FIX ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -23,6 +24,33 @@ if parent_dir not in sys.path:
 # Configuration
 API_URL = "http://localhost:8000"
 st.set_page_config(page_title="HARP Vision", layout="wide", page_icon="static/favicon.ico")
+
+# --- MULTITHREADED CAMERA STREAMER ---
+class CameraStream:
+    """Reads frames from a camera in a background thread to prevent GUI lagging."""
+    def __init__(self, src=0):
+        self.stream = cv2.VideoCapture(src)
+        self.stream.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        (self.grabbed, self.frame) = self.stream.read()
+        self.stopped = False
+
+    def start(self):
+        t = threading.Thread(target=self.update, args=(), daemon=True)
+        t.start()
+        return self
+
+    def update(self):
+        while True:
+            if self.stopped:
+                return
+            self.grabbed, self.frame = self.stream.read()
+
+    def read(self):
+        return self.frame
+
+    def stop(self):
+        self.stopped = True
+        self.stream.release()
 
 # --- GOOGLE MATERIAL SYMBOLS SETUP ---
 st.markdown('<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined" rel="stylesheet">', unsafe_allow_html=True)
@@ -40,6 +68,8 @@ class ClockProcessor(VideoProcessorBase):
         self.fps = 0
         self.last_time = time.time()
         self.force_expert = False 
+        self.manual_min_val = ""
+        self.manual_max_val = ""
         self.last_result = None
         
         from app.core.engine import HARPEngine
@@ -60,7 +90,12 @@ class ClockProcessor(VideoProcessorBase):
         # Process every 5th frame to save CPU
         if self.frame_count % 5 == 0:
             try:
-                self.last_result = self.engine.analyze(img, force_expert=self.force_expert)
+                self.last_result = self.engine.analyze(
+                    img, 
+                    force_expert=self.force_expert,
+                    manual_min_val=self.manual_min_val,
+                    manual_max_val=self.manual_max_val
+                )
             except Exception as e:
                 print(f"AI Error: {e}")
 
@@ -255,30 +290,176 @@ elif st.session_state.page == "webcam":
     st.markdown(f"## {icon('videocam')} Real-Time Analysis", unsafe_allow_html=True)
     st.info("Running C1 (Localization) + C2 (Pose) locally. Processes every 5th frame.")
     
-    rtc_configuration = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
+    # Camera Source Selection
+    cam_source = st.radio("Select Camera Source", ["Local Webcam", "IP Camera (RTSP)"], horizontal=True)
+    
     col1, col2 = st.columns([3, 1])
     
+    # We will store the stream loop execution to the end of the block
+    run_ip_cam_loop = False
+    rtsp_url = ""
+    
     with col1:
-        ctx = webrtc_streamer(
-            key="harp-ai", 
-            video_processor_factory=ClockProcessor, 
-            rtc_configuration=rtc_configuration, 
-            media_stream_constraints={"video": True, "audio": False}, 
-            async_processing=True
-        )
-        
+        if cam_source == "Local Webcam":
+            rtc_configuration = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
+            ctx = webrtc_streamer(
+                key="harp-ai", 
+                video_processor_factory=ClockProcessor, 
+                rtc_configuration=rtc_configuration, 
+                media_stream_constraints={"video": True, "audio": False}, 
+                async_processing=True
+            )
+            expert_controls_ctx = ctx
+        else:
+            # IP Camera (RTSP)
+            rtsp_url = st.text_input("RTSP Stream URL", placeholder="rtsp://username:password@ip_address:port/stream")
+            start_ip_cam = st.checkbox("Start IP Camera Stream")
+            
+            expert_controls_ctx = "ip_cam"
+            if start_ip_cam and rtsp_url:
+                run_ip_cam_loop = True
+                stframe = st.empty()
+                
+                if "ip_cam_engine" not in st.session_state:
+                    from app.core.engine import HARPEngine
+                    st.session_state.ip_cam_engine = HARPEngine(parent_dir)
+                if "ip_cam_expert" not in st.session_state:
+                    st.session_state.ip_cam_expert = False
+                if "ip_cam_manual_min" not in st.session_state:
+                    st.session_state.ip_cam_manual_min = ""
+                if "ip_cam_manual_max" not in st.session_state:
+                    st.session_state.ip_cam_manual_max = ""
+
     with col2:
         st.markdown(f"### {icon('tune')} Controls", unsafe_allow_html=True)
-        if ctx.video_processor:
+        
+        # Expert Mode Toggle
+        st.markdown(f"{icon('military_tech')} **Force Expert Mode**", unsafe_allow_html=True)
+        if cam_source == "Local Webcam" and expert_controls_ctx and expert_controls_ctx.video_processor:
+            expert_controls_ctx.video_processor.force_expert = st.checkbox("Enable C3/XAI", value=False, key="webcam_expert")
+        elif cam_source == "IP Camera (RTSP)":
+            expert_enabled = st.checkbox("Enable C3/XAI", value=st.session_state.get("ip_cam_expert", False), key="ip_expert")
+            st.session_state.ip_cam_expert = expert_enabled
             
-            # Expert Mode Toggle
-            st.markdown(f"{icon('military_tech')} **Force Expert Mode**", unsafe_allow_html=True)
-            ctx.video_processor.force_expert = st.checkbox("Enable C3/XAI", value=False)
-            
+        st.markdown("---")
+        
+        # Manual Scale Overrides
+        st.markdown(f"#### {icon('edit')} Manual Gauge Scale", unsafe_allow_html=True)
+        colA, colB = st.columns(2)
+        
+        if cam_source == "Local Webcam" and expert_controls_ctx and expert_controls_ctx.video_processor:
+            manual_min = colA.text_input("Min Value", "", key="webcam_min")
+            manual_max = colB.text_input("Max Value", "", key="webcam_max")
+            expert_controls_ctx.video_processor.manual_min_val = manual_min if manual_min.strip() else ""
+            expert_controls_ctx.video_processor.manual_max_val = manual_max if manual_max.strip() else ""
+        elif cam_source == "IP Camera (RTSP)":
+            manual_min = colA.text_input("Min Value", st.session_state.get("ip_cam_manual_min", ""), key="ip_min")
+            manual_max = colB.text_input("Max Value", st.session_state.get("ip_cam_manual_max", ""), key="ip_max")
+            st.session_state.ip_cam_manual_min = manual_min if manual_min.strip() else ""
+            st.session_state.ip_cam_manual_max = manual_max if manual_max.strip() else ""
+
         st.markdown("---")
         if st.button("Reset Connection"): 
             st.cache_resource.clear()
             st.rerun()
+
+    # Execute IP Camera Loop AFTER all UI is rendered
+    if run_ip_cam_loop:
+        # Optimization: use cv2.CAP_FFMPEG explicitly with TCP for stable RTSP parsing if needed, 
+        # but standard VideoCapture usually works best with minimal buffering settings.
+        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;udp" # or tcp
+        
+        # Instantiate MULTITHREADED streamer
+        if "cam_stream" not in st.session_state or st.session_state.cam_stream_url != rtsp_url:
+            if "cam_stream" in st.session_state:
+                st.session_state.cam_stream.stop()
+            st.session_state.cam_stream = CameraStream(rtsp_url).start()
+            st.session_state.cam_stream_url = rtsp_url
+            
+        stream = st.session_state.cam_stream
+        
+        # Give stream a moment to connect
+        time.sleep(0.5) 
+        
+        # We check stream.stream.isOpened() to verify OpenCV connected properly at init
+        if not stream.stream.isOpened():
+            stframe.error("Failed to open RTSP stream. Check the URL and network connection. IP Cameras require authentication in the format rtsp://USER:PASS@IP:PORT/stream.")
+            stream.stop()
+            del st.session_state.cam_stream
+        else:
+            frame_count = 0
+            last_time = time.time()
+            last_ui_update_time = time.time()
+            fps = 0
+            last_result = None
+            
+            # Target ~15 FPS for the frontend UI to prevent Streamlit websocket lag
+            UI_UPDATE_INTERVAL = 1.0 / 15.0 
+            
+            # Analyze interval (e.g. 5 means AI runs roughly ~5-6 times a second assuming UI loop runs at 30 FPS)
+            ANALYZE_INTERVAL = 5
+            
+            while start_ip_cam:  # Use the checkbox state from UI to control the loop
+                # Instantly grab latest frame from background thread (no blocking!)
+                frame = stream.read()
+                
+                if frame is None:
+                    # Thread might be reconnecting or stopped
+                    time.sleep(0.1)
+                    continue
+                    
+                frame_count += 1
+                now = time.time()
+                
+                # FPS Calculation
+                if now - last_time > 1:
+                    fps = frame_count
+                    frame_count = 0
+                    last_time = now
+                    
+                # 1. AI Inference
+                if frame_count % ANALYZE_INTERVAL == 0:
+                    try:
+                        # Optional: resize frame before inference to save CPU if it's huge (e.g. 4k)
+                        # small_frame = cv2.resize(frame, (640, 480)) 
+                        # We must copy the frame because Streamlit/AI shouldn't modify the thread's raw array directly
+                        frame_for_ai = frame.copy() 
+                        last_result = st.session_state.ip_cam_engine.analyze(
+                            frame_for_ai, 
+                            force_expert=st.session_state.ip_cam_expert,
+                            manual_min_val=st.session_state.ip_cam_manual_min,
+                            manual_max_val=st.session_state.ip_cam_manual_max
+                        )
+                    except Exception as e:
+                        print(f"AI Error: {e}")
+                        
+                # 2. Draw Overlays (We draw instantly on the copied frame before rendering)
+                display_frame = frame.copy()
+                if last_result:
+                    res = last_result
+                    display_val = res.get('time', '--')
+                    cv2.putText(display_frame, f"READING: {display_val}", (50, 100), cv2.FONT_HERSHEY_DUPLEX, 1.2, (0, 255, 0), 3)
+                    
+                    method = res.get('method', 'Unknown')
+                    color = (0, 255, 0) if "Fast" in method or "Gauge" in method else (0, 0, 255)
+                    cv2.putText(display_frame, f"Mode: {method}", (50, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+                    
+                    if "angles" in res and res["angles"].get("hand1", 0) != 0.0:
+                        a1 = res["angles"].get("hand1", 0)
+                        a2 = res["angles"].get("hand2", 0)
+                        cv2.putText(display_frame, f"H:{a1:.0f} M:{a2:.0f}", (50, 190), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+
+                cv2.putText(display_frame, f"Pipeline FPS: {fps}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
+                
+                # 3. Streamlit UI Update
+                if now - last_ui_update_time >= UI_UPDATE_INTERVAL:
+                    # Convert BGR to RGB for Streamlit
+                    frame_rgb = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
+                    stframe.image(frame_rgb, channels="RGB", use_container_width=True)
+                    last_ui_update_time = now
+                    
+                # Sleep briefly to free CPU for the background reading thread if needed
+                time.sleep(0.01)
 
 # --- PAGE 3: BATCH ---
 elif st.session_state.page == "batch":
