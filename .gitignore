@@ -13,12 +13,12 @@ env/
 analytics.db
 data/
 
-# Large Model Files (They live on Google Drive, not GitHub)
-models/**/*.pt
-models/**/*.pth
-models/c1_localization/*.pt
-models/c2_hands_skeleton/*.pt
-models/c3_angle_regression/*.pth
+# # Large Model Files (They live on Google Drive, not GitHub)
+# models/**/*.pt
+# models/**/*.pth
+# models/c1_localization/*.pt
+# models/c2_hands_skeleton/*.pt
+# models/c3_angle_regression/*.pth
 
 # OS junk
 .DS_Store
