@@ -8,11 +8,11 @@ import base64
 import os
 import time
 from typing import List
-from app.core.engine import ClockEngine
+from app.core.engine import HARPEngine 
 from app.core.metrics import metrics_tracker
 
-# --- [C4] API SETUP (Member 4) ---
-app = FastAPI(title="Clock AI Research - Multi-Stage Visualization")
+# --- [C4] API SETUP ---
+app = FastAPI(title="HARP Research - Multi-Model Analysis API")
 
 app.add_middleware(
     CORSMiddleware,
@@ -23,46 +23,77 @@ app.add_middleware(
 )
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-engine = ClockEngine(BASE_DIR)
 
-# --- [C4] MAIN ANALYSIS ENDPOINT (Member 4) ---
+# Initialize Engine
+engine = HARPEngine(BASE_DIR)
+
+# --- [C4] MAIN ANALYSIS ENDPOINT ---
 @app.post("/analyze")
-async def analyze_clock(file: UploadFile = File(...), force_expert: bool = Form(False)):
+async def analyze_image(
+    file: UploadFile = File(...), 
+    force_expert: bool = Form(False),
+    gauge_template: str = Form("Auto-Detect (AI OCR)"),
+    manual_min_val: str = Form(""),
+    manual_max_val: str = Form("")
+):
     start_time = time.time()
     
+    # 1. Decode Image
     contents = await file.read()
     nparr = np.frombuffer(contents, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-    # Call the Engine (Integrated Logic)
-    result = engine.analyze(img, force_expert=force_expert)
+    if img is None:
+        return {
+            "result": {"error": "Invalid or corrupted image file."},
+            "processing_time": time.time() - start_time
+        }
+
+
+    # 2. Call the Engine
+    result = engine.analyze(
+        img, 
+        force_expert=force_expert, 
+        gauge_template=gauge_template,
+        manual_min_val=manual_min_val, 
+        manual_max_val=manual_max_val
+    )
     
     processing_time = time.time() - start_time
     
     # [C4] Log to Database
     metrics_tracker.record_analysis(result, processing_time, file.filename)
     
-    if "error" in result:
+    if "error" in result and result["error"]:
         return {"result": result, "processing_time": processing_time}
     
     # [C4] Process Visualizations for API Response
     viz_base64 = {}
     if "visualizations" in result:
-        for stage_name, stage_img in result["visualizations"].items():
-            if stage_name == "c3_crops":
+        for stage_name, stage_val in result["visualizations"].items():
+            # Handle list of crops (C3 output)
+            if isinstance(stage_val, list):
                 crops_b64 = []
-                for crop in stage_img:
-                    _, buffer = cv2.imencode('.jpg', crop)
-                    crops_b64.append(base64.b64encode(buffer).decode('utf-8'))
+                for crop in stage_val:
+                    if isinstance(crop, np.ndarray) and crop.size > 0:
+                        _, buffer = cv2.imencode('.jpg', crop)
+                        crops_b64.append(base64.b64encode(buffer).decode('utf-8'))
                 viz_base64[stage_name] = crops_b64
-            else:
-                _, buffer = cv2.imencode('.jpg', stage_img)
+            
+            # Handle single image (C1/C2 output)
+            elif isinstance(stage_val, np.ndarray) and stage_val.size > 0:
+                _, buffer = cv2.imencode('.jpg', stage_val)
                 viz_base64[stage_name] = base64.b64encode(buffer).decode('utf-8')
+
+        # Remove raw arrays from result to make it JSON serializable
         result.pop("visualizations", None)
     
+    # Handle Heatmap (C3 XAI)
     heatmap_b64 = None
     if result.get("heatmap") is not None:
-        _, buffer = cv2.imencode('.jpg', (result["heatmap"] * 255).astype(np.uint8))
+        # Normalize 0-1 float to 0-255 uint8
+        heatmap_uint8 = (result["heatmap"] * 255).astype(np.uint8)
+        _, buffer = cv2.imencode('.jpg', heatmap_uint8)
         heatmap_b64 = base64.b64encode(buffer).decode('utf-8')
         result["heatmap"] = None
     
@@ -73,10 +104,17 @@ async def analyze_clock(file: UploadFile = File(...), force_expert: bool = Form(
         "processing_time": processing_time
     }
 
-# --- [C4] BATCH PROCESSING (Member 4) ---
+# --- [C4] BATCH PROCESSING ---
 @app.post("/analyze_batch")
-async def analyze_batch(files: List[UploadFile] = File(...), force_expert: bool = Form(False)):
+async def analyze_batch(
+    files: List[UploadFile] = File(...), 
+    force_expert: bool = Form(False),
+    gauge_template: str = Form("Auto-Detect (AI OCR)"),
+    manual_min_val: str = Form(""),
+    manual_max_val: str = Form("")
+):
     results = []
+
     for file in files:
         try:
             start_time = time.time()
@@ -84,15 +122,24 @@ async def analyze_batch(files: List[UploadFile] = File(...), force_expert: bool 
             nparr = np.frombuffer(contents, np.uint8)
             img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
             
-            result = engine.analyze(img, force_expert=force_expert)
+            if img is None:
+                raise ValueError("Invalid or corrupted image file.")
+                
+            result = engine.analyze(
+                img, 
+                force_expert=force_expert,
+                gauge_template=gauge_template,
+                manual_min_val=manual_min_val, 
+                manual_max_val=manual_max_val
+            )
             processing_time = time.time() - start_time
             
             metrics_tracker.record_analysis(result, processing_time, file.filename)
             
             results.append({
                 "filename": file.filename,
-                "success": "error" not in result,
-                "time": result.get("time", "N/A"),
+                "success": "error" not in result or not result["error"],
+                "value": result.get("time", "N/A"), # 'time' key holds both Time and Gauge %
                 "method": result.get("method", "Unknown"),
                 "processing_time": processing_time
             })
@@ -101,7 +148,7 @@ async def analyze_batch(files: List[UploadFile] = File(...), force_expert: bool 
     
     return {"total_images": len(files), "results": results}
 
-# --- [C4] METRICS ENDPOINTS (Member 4) ---
+# --- [C4] METRICS ENDPOINTS ---
 @app.get("/metrics")
 async def get_metrics():
     return metrics_tracker.get_metrics()
@@ -122,3 +169,4 @@ async def clear_metrics():
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
+    

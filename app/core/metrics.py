@@ -4,6 +4,66 @@ import threading
 from datetime import datetime
 from typing import Dict, List, Optional
 import pandas as pd
+import math
+
+# --- [C4] GAUGE READING LOGIC ---
+def calculate_gauge_reading(keypoints: List[tuple]) -> float:
+    """
+    [C4] Converts 4 gauge keypoints into a percentage (0-100%).
+    Expected order: [Center, Min, Max, Tip]
+    """
+    if len(keypoints) < 4:
+        return 0.0
+
+    center, min_pt, max_pt, tip_pt = keypoints
+
+    def get_angle(p1, p2):
+        # Returns angle in degrees (0-360) relative to X-axis
+        ang = math.degrees(math.atan2(p2[1] - p1[1], p2[0] - p1[0]))
+        return (ang + 360) % 360
+
+    # 1. Get Raw Angles
+    ang_min = get_angle(center, min_pt)
+    ang_max = get_angle(center, max_pt)
+    ang_tip = get_angle(center, tip_pt)
+
+    # 2. Normalize to 0 (Set Min as the 0-degree starting point)
+    drift = -ang_min
+    rot_max = (ang_max + drift + 360) % 360
+    rot_tip = (ang_tip + drift + 360) % 360
+
+    # 3. Physics Validation (Out of bounds check)
+    if rot_tip > rot_max:
+        # Check if it's closer to 0 (Underflow) or Max (Overflow)
+        diff_min = min(rot_tip, 360 - rot_tip)
+        diff_max = abs(rot_tip - rot_max)
+        if diff_min < diff_max: 
+            return 0.0    # Needle resting at/below 0
+        else: 
+            return 100.0  # Needle pinned past Max
+
+    # 4. Calculate Final Percentage
+    if rot_max == 0: 
+        return 0.0
+        
+    percentage = (rot_tip / rot_max) * 100
+    return round(percentage, 1)
+
+def calculate_gauge_reading_advanced(span: float, needle: float, min_val: float, max_val: float) -> tuple:
+    """
+    [C4] Calculates actual physical reading from gauge span/needle and scale extremes.
+    Returns (reading, units_per_degree).
+    """
+    if span <= 0 or min_val is None or max_val is None:
+        return 0.0, 0.0
+        
+    try:
+        units_per_degree = (max_val - min_val) / span
+        reading = min_val + (needle * units_per_degree)
+        return round(reading, 2), round(units_per_degree, 4)
+    except:
+        return 0.0, 0.0
+
 
 # --- [C4] METRICS TRACKER CLASS (Member 4) ---
 class MetricsTracker:
