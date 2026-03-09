@@ -21,6 +21,8 @@ parent_dir = os.path.abspath(os.path.join(current_dir, ".."))
 if parent_dir not in sys.path:
     sys.path.append(parent_dir)
 
+from app.c1_ui import render_c1_localization
+
 # Configuration
 API_URL = "http://localhost:8000"
 st.set_page_config(page_title="HARP Vision", layout="wide", page_icon="static/favicon.ico")
@@ -138,6 +140,9 @@ def display_results(data):
     method_icon = "bolt" if is_fast else "psychology"
     method_color = "green" if is_fast else "orange"
     
+    type_identified = "Gauge" if "Gauge" in res["method"] else "Clock"
+    
+    st.markdown(f"**Identified Type:** <span style='color:blue'>{icon('visibility')} {type_identified}</span>", unsafe_allow_html=True)
     st.markdown(f"**Method Used:** <span style='color:{method_color}'>{icon(method_icon, size=20)} {res['method']}</span>", unsafe_allow_html=True)
     
     stages = [
@@ -161,8 +166,7 @@ def display_results(data):
     tab1, tab2, tab3, tab4 = st.tabs(["Localization", "Structure", "Expert AI", "Result"])
     
     with tab1:
-        st.markdown(f"{icon('crop_free')} **YOLO Localization**", unsafe_allow_html=True)
-        if "c1_detection" in viz: st.image(base64.b64decode(viz["c1_detection"]), width=300)
+        render_c1_localization(viz, res)
     with tab2:
         st.markdown(f"{icon('timeline')} **Keypoints**", unsafe_allow_html=True)
         col2a, col2b = st.columns(2)
@@ -259,10 +263,27 @@ if st.session_state.page == "analysis":
     
     force_expert = st.checkbox("Force Expert Path (Activate C3 + XAI)", value=False)
     
-    st.markdown(f"#### {icon('edit')} Manual Gauge Scale Overrides", unsafe_allow_html=True)
-    colA, colB = st.columns(2)
-    manual_min = colA.text_input("Min Value (Optional)", "")
-    manual_max = colB.text_input("Max Value (Optional)", "")
+    manual_min, manual_max = "", ""
+    
+    if uploaded_file:
+        if "identified_type" not in st.session_state or st.session_state.get("last_uploaded") != uploaded_file.name:
+            with st.spinner("Detecting image type..."):
+                try:
+                    files = {"file": ("image.jpg", uploaded_file.getvalue(), "image/jpeg")}
+                    response = requests.post(f"{API_URL}/identify", files=files)
+                    if response.status_code == 200:
+                        st.session_state.identified_type = response.json().get("type", "none")
+                    else:
+                        st.session_state.identified_type = "none"
+                    st.session_state.last_uploaded = uploaded_file.name
+                except Exception as e:
+                    st.session_state.identified_type = "none"
+                    
+        # if st.session_state.get("identified_type") == "gauge":
+        #     st.markdown(f"#### {icon('edit')} Manual Gauge Scale Overrides", unsafe_allow_html=True)
+        #     colA, colB = st.columns(2)
+        #     manual_min = colA.text_input("Min Value (Optional)", "")
+        #     manual_max = colB.text_input("Max Value (Optional)", "")
 
     if uploaded_file and st.button("Run Analysis", type="primary"):
         with st.spinner("Processing..."):

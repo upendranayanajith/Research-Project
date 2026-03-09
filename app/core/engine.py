@@ -253,6 +253,18 @@ class HARPEngine:
         x2, y2 = min(w, x2 + pad), min(h, y2 + pad)
         return img[y1:y2, x1:x2], (x1, y1, x2, y2)
 
+    def _score_quality(self, img):
+        if img is None or img.size == 0: return {"blur": 0, "brightness": 0, "contrast": 0, "overall": 0}
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        blur = cv2.Laplacian(gray, cv2.CV_64F).var()
+        brightness = np.mean(gray)
+        contrast = np.std(gray)
+        blur_score = min(blur / 500.0 * 100, 100) 
+        bright_score = 100 - (abs(brightness - 127) / 127 * 100)
+        contrast_score = min(contrast / 60.0 * 100, 100)
+        overall = (blur_score * 0.4) + (bright_score * 0.3) + (contrast_score * 0.3)
+        return {"blur": blur, "brightness": brightness, "contrast": contrast, "overall": max(0, min(100, overall))}
+
     def _localize_all(self, img):
         clock_res = self.c1_clock_model(img, verbose=False)[0] if self.c1_clock_model else None
         gauge_res = self.c1_gauge_model(img, verbose=False)[0] if self.c1_gauge_model else None
@@ -274,6 +286,7 @@ class HARPEngine:
         label = f"{detected_type.capitalize()} Detected"
         cv2.rectangle(img_copy, (x1, y1), (x2, y2), (0, 255, 255), 3)
         cv2.putText(img_copy, label, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+     
         return self._resize_small(img_copy)
 
     # --- [C2] SKELETON VISUALIZATION (No Text) ---
@@ -402,9 +415,11 @@ class HARPEngine:
         detected_type = 'clock' if c2_clock_conf > c2_gauge_conf else 'gauge'
         target_crop = c_crop if detected_type == 'clock' else g_crop
         bbox = c_bbox if detected_type == 'clock' else g_bbox
+        conf = c_conf if detected_type == 'clock' else g_conf
         
         debug_info.append(f"C2 Validation: Chose {detected_type.capitalize()} (Clock KP Conf: {c2_clock_conf:.2f}, Gauge KP Conf: {c2_gauge_conf:.2f})")
 
+        quality = self._score_quality(target_crop)
         visualizations['c1_detection'] = self._draw_bbox(img_array, bbox, detected_type)
 
         # ==========================================
@@ -482,7 +497,9 @@ class HARPEngine:
                 "angles": {"span": span, "needle": needle, "units_per_deg": units_per_deg},
                 "scale": {"min": parsed_min, "max": parsed_max},
                 "reasoning": reasoning_str,
-                "error": ""
+                "error": "",
+                "c1_conf": float(conf),
+                "c1_quality": quality
             }
 
         # ==========================================
@@ -521,7 +538,9 @@ class HARPEngine:
                     "error": "",
                     "ampm": ampm_status,
                     "drift": drift_str,
-                    "ambiguity": ambiguity_warning
+                    "ambiguity": ambiguity_warning,
+                    "c1_conf": float(conf),
+                    "c1_quality": quality
                 }
             
             # --- [C3] CLOCK EXPERT PATH ---
@@ -596,7 +615,9 @@ class HARPEngine:
                     "error": "",
                     "ampm": ampm_status,
                     "drift": drift_str_expert,
-                    "ambiguity": ambiguity_warning_expert or ambiguity_warning
+                    "ambiguity": ambiguity_warning_expert or ambiguity_warning,
+                    "c1_conf": float(conf),
+                    "c1_quality": quality
                 }
 
 # Alias mapping so you don't break existing `main.py` imports 
