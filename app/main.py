@@ -236,6 +236,135 @@ async def clear_metrics():
     metrics_tracker.clear_metrics()
     return {"message": "Metrics cleared"}
 
+
+# =============================================================================
+# [T3.2] CLOCK STYLE ENDPOINT
+# =============================================================================
+@app.post("/style/classify")
+async def classify_style(file: UploadFile = File(...)):
+    """
+    [T3.2] Classify the visual style of a clock image.
+    Returns: style_idx, style_name, confidence, per-class probabilities.
+    """
+    contents = await file.read()
+    nparr = np.frombuffer(contents, np.uint8)
+    img   = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    if img is None:
+        return JSONResponse({"error": "Invalid image"}, status_code=400)
+    from PIL import Image as PILImage
+    pil = PILImage.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+    result = engine.style_analyser.classify(pil)
+    return {"style": result}
+
+
+# =============================================================================
+# [T3.3] FEDERATED LEARNING ENDPOINTS
+# =============================================================================
+from app.core.federated import FederatedCoordinator, FederatedNode
+import copy
+
+# Global coordinator — shared across requests (in-memory for prototype)
+_fed_coordinator: FederatedCoordinator = None
+
+def _get_coordinator() -> FederatedCoordinator:
+    global _fed_coordinator
+    if _fed_coordinator is None and engine.c3_model is not None:
+        _fed_coordinator = FederatedCoordinator(engine.c3_model)
+        print("✅ FederatedCoordinator initialized")
+    return _fed_coordinator
+
+
+@app.post("/federated/register")
+async def federated_register(node_id: str = Form(...), n_samples: int = Form(100)):
+    """
+    [T3.3] Register a new camera node with the federated coordinator.
+
+    Args:
+        node_id:   Unique node identifier (e.g. 'rtsp_cam_01').
+        n_samples: Approximate number of local labelled samples.
+    """
+    coord = _get_coordinator()
+    if coord is None:
+        return JSONResponse({"error": "C3 model not loaded — coordinator unavailable."}, status_code=503)
+    msg = coord.register_node(node_id, n_samples)
+    return {"message": msg, "coordinator_status": coord.status()}
+
+
+@app.get("/federated/pull_weights")
+async def federated_pull_weights():
+    """
+    [T3.3] Pull current global model weights from the coordinator.
+    Returns weights as a dict of {param_name: shape} (not the raw tensors —
+    actual weight transfer would use a binary stream in production).
+    """
+    coord = _get_coordinator()
+    if coord is None:
+        return JSONResponse({"error": "Coordinator unavailable."}, status_code=503)
+    weights = coord.get_global_weights()
+    return {
+        "round":       coord._round,
+        "n_params":    sum(v.numel() for v in weights.values()),
+        "param_shapes": {k: list(v.shape) for k, v in weights.items()},
+        "message":     "Use POST /federated/push_update to send your weight delta after local training.",
+    }
+
+
+@app.get("/federated/status")
+async def federated_status():
+    """[T3.3] Get current federated coordinator status."""
+    coord = _get_coordinator()
+    if coord is None:
+        return {"status": "not_initialized", "reason": "C3 model not loaded"}
+    return coord.status()
+
+
+# =============================================================================
+# [T3.5] RESEARCH ARCHITECTURES INFO ENDPOINT
+# =============================================================================
+@app.get("/research/architectures")
+async def get_research_architectures():
+    """
+    [T3.4, T3.5] Returns information about available Tier 3 architectures.
+    """
+    return {
+        "standard_c3": {
+            "backbone":     "ResNet18",
+            "head":         "Sigmoid scalar",
+            "loss":         "MSELoss",
+            "limitation":   "0°/360° wraparound discontinuity",
+            "checkpoint":   "models/c3_angle_regression/best.pth",
+            "status":       "active",
+        },
+        "circular_c3": {
+            "backbone":     "ResNet18",
+            "head":         "CircularHead (sin θ, cos θ)",
+            "loss":         "VonMisesLoss (1 - cos(δθ))",
+            "advantage":    "No wraparound ambiguity — 0° and 360° identical",
+            "training":     "scripts/train_c3_circular.py",
+            "checkpoint":   "models/c3_circular/best.pth",
+            "status":       "architecture ready, needs retraining",
+            "tier":         "T3.5",
+        },
+        "vit_c3": {
+            "backbone":     "ViT-B/16 (Vision Transformer)",
+            "head":         "Sigmoid or CircularHead",
+            "xai":          "Attention Rollout (no GradCAM++ needed)",
+            "advantage":    "Built-in interpretable attention, 14×14 patch attention map",
+            "training":     "scripts/train_c3_circular.py --backbone vit",
+            "checkpoint":   "models/c3_vit/best.pth",
+            "status":       "architecture ready, needs retraining",
+            "tier":         "T3.4",
+        },
+        "style_conditioned_c3": {
+            "backbone":     "ResNet18 + ClockStyleEmbedding (8-dim)",
+            "head":         "Sigmoid scalar, conditioned on style",
+            "styles":       ["Modern Analog", "Antique/Ornate", "Minimalist"],
+            "advantage":    "Domain-adaptive — clock aesthetics improve cross-style accuracy",
+            "status":       "architecture ready, needs retraining",
+            "tier":         "T3.2",
+        },
+    }
+
+
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
-    

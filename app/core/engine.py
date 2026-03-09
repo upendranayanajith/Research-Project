@@ -14,6 +14,9 @@ from app.core.xai import (
 )
 from app.core.metrics import calculate_gauge_reading, calculate_gauge_reading_advanced
 from app.core.temporal import TemporalTracker   # [Tier 1.4] Temporal Consistency
+from app.core.losses import VonMisesLoss, CircularHead, decode_circular_numpy  # [T3.5]
+from app.core.style import StyleAnalyser                                         # [T3.2]
+from app.core.vit_xai import ViTC3Model, VitAttentionVisualizer                  # [T3.4]
 import google.generativeai as genai
 import easyocr
 from dotenv import load_dotenv
@@ -90,6 +93,16 @@ class HARPEngine:
         )
         print("✅ Temporal Tracker (Kalman) Initialized.")
 
+        # --- [T3.2] CLOCK STYLE CLASSIFIER ---
+        style_weights = os.path.join(base_dir, "models", "c3_style_classifier", "best.pth")
+        self.style_analyser = StyleAnalyser(weights_path=style_weights,
+                                            device=str(self.device))
+        print("✅ Style Analyser Initialized (no weights → uniform priors).")
+
+        # --- [T3.4] ViT XAI Visualizer (complementary to GradCAM++) ---
+        self.vit_attention_visualizer = VitAttentionVisualizer()
+        print("✅ ViT Attention Visualizer Initialized.")
+
     def _load_yolo(self, path, name):
         try:
             print(f"Loading {name}: {path}...")
@@ -107,16 +120,35 @@ class HARPEngine:
 
     def _get_c3_arch_circular(self):
         """
-        [FIX-1 FUTURE] Circular regression head: outputs (sin, cos) instead of
-        a sigmoid scalar, resolving the 0°/360° wraparound ambiguity.
-        Requires retraining — kept disabled by default (use_circular=False).
-        Decoder: angle = atan2(sin_out, cos_out) * (180/pi) % 360
+        [T3.5] Circular regression head: outputs (sin θ, cos θ) instead of a
+        Sigmoid scalar, resolving the 0°/360° wraparound ambiguity.
+
+        Uses CircularHead from app.core.losses which L2-normalises the output
+        to the unit circle. Decode with decode_circular_numpy() for inference.
+
+        Requires retraining with VonMisesLoss — see scripts/train_c3_circular.py
+        Checkpoint: models/c3_circular/best.pth
         """
-        model = models.resnet18(weights=None)
-        num_ftrs = model.fc.in_features
-        model.fc = nn.Linear(num_ftrs, 2)   # Two outputs: sin, cos
-        # No Sigmoid — raw linear outputs fed to atan2
-        return model
+        backbone = models.resnet18(weights=None)
+        feature_extractor = nn.Sequential(*list(backbone.children())[:-1])  # (N, 512, 1, 1)
+        flatten = nn.Flatten()                                                # (N, 512)
+        head    = CircularHead(in_features=512)                               # (N, 2)
+        return nn.Sequential(feature_extractor, flatten, head)
+
+    def _get_c3_arch_vit(self, circular: bool = False, pretrained: bool = True):
+        """
+        [T3.4] ViT-B/16 backbone for C3 — interpretable attention maps,
+        no GradCAM++ required.
+
+        Args:
+            circular:   If True, use CircularHead output (sin/cos).
+            pretrained: If True, load ImageNet weights for the ViT backbone.
+
+        Requires retraining — see scripts/train_c3_circular.py with ViT backbone.
+        Checkpoint: models/c3_vit/best.pth
+        """
+        return ViTC3Model(circular=circular, pretrained=pretrained)
+
 
     def _enable_dropout(self):
         """Sets all Dropout layers in c3_model to train mode (enables stochastic dropout)."""
