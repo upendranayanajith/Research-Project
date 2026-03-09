@@ -1,6 +1,7 @@
 import os
 import cv2
 import numpy as np
+import re
 import math
 import torch
 import torch.nn as nn
@@ -190,7 +191,6 @@ class HARPEngine:
             
             parts = [p.strip() for p in text.split(',')]
             if len(parts) >= 2:
-                import re
                 min_match = re.findall(r"[-+]?\d*\.\d+|\d+", parts[0])
                 max_match = re.findall(r"[-+]?\d*\.\d+|\d+", parts[1])
                 
@@ -420,6 +420,9 @@ class HARPEngine:
         debug_info.append(f"C2 Validation: Chose {detected_type.capitalize()} (Clock KP Conf: {c2_clock_conf:.2f}, Gauge KP Conf: {c2_gauge_conf:.2f})")
 
         quality = self._score_quality(target_crop)
+        c_quality = self._score_quality(c_crop) if c_crop is not None else {"blur": 0, "brightness": 0, "contrast": 0, "overall": 0}
+        g_quality = self._score_quality(g_crop) if g_crop is not None else {"blur": 0, "brightness": 0, "contrast": 0, "overall": 0}
+        
         visualizations['c1_detection'] = self._draw_bbox(img_array, bbox, detected_type)
 
         # ==========================================
@@ -499,7 +502,11 @@ class HARPEngine:
                 "reasoning": reasoning_str,
                 "error": "",
                 "c1_conf": float(conf),
-                "c1_quality": quality
+                "c1_quality": quality,
+                "c1_clock_conf": float(c_conf) if c_conf != -1.0 else 0.0,
+                "c1_gauge_conf": float(g_conf) if g_conf != -1.0 else 0.0,
+                "c1_clock_quality": c_quality,
+                "c1_gauge_quality": g_quality
             }
 
         # ==========================================
@@ -540,7 +547,11 @@ class HARPEngine:
                     "drift": drift_str,
                     "ambiguity": ambiguity_warning,
                     "c1_conf": float(conf),
-                    "c1_quality": quality
+                    "c1_quality": quality,
+                    "c1_clock_conf": float(c_conf) if c_conf != -1.0 else 0.0,
+                    "c1_gauge_conf": float(g_conf) if g_conf != -1.0 else 0.0,
+                    "c1_clock_quality": c_quality,
+                    "c1_gauge_quality": g_quality
                 }
             
             # --- [C3] CLOCK EXPERT PATH ---
@@ -617,7 +628,11 @@ class HARPEngine:
                     "drift": drift_str_expert,
                     "ambiguity": ambiguity_warning_expert or ambiguity_warning,
                     "c1_conf": float(conf),
-                    "c1_quality": quality
+                    "c1_quality": quality,
+                    "c1_clock_conf": float(c_conf) if c_conf != -1.0 else 0.0,
+                    "c1_gauge_conf": float(g_conf) if g_conf != -1.0 else 0.0,
+                    "c1_clock_quality": c_quality,
+                    "c1_gauge_quality": g_quality
                 }
 
 # Alias mapping so you don't break existing `main.py` imports 
