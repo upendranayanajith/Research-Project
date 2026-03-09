@@ -164,15 +164,305 @@ def display_results(data):
         st.markdown(f"{icon('crop_free')} **YOLO Localization**", unsafe_allow_html=True)
         if "c1_detection" in viz: st.image(base64.b64decode(viz["c1_detection"]), width=300)
     with tab2:
-        st.markdown(f"{icon('timeline')} **Keypoints**", unsafe_allow_html=True)
-        col2a, col2b = st.columns(2)
-        with col2a:
-            if "c2_skeleton" in viz: st.image(base64.b64decode(viz["c2_skeleton"]), width=300)
-        with col2b:
-            if "scale" in res and res["scale"]:
-                st.markdown("### OCR Scale Check")
-                st.info(f"**Min Reading:** {res['scale'].get('min', 'Failed')}")
-                st.error(f"**Max Reading:** {res['scale'].get('max', 'Failed')}")
+        st.markdown(f"### {icon('timeline')} C2 — Skeleton Structure Analysis", unsafe_allow_html=True)
+        c2r = data.get("c2_research")
+        
+        sub1, sub2, sub3, sub4, sub5, sub6, sub7 = st.tabs([
+            "✏️ Skeleton", "🔬 Scale Analysis", "🔮 3D Reconstruction",
+            "🟢 Manifold", "⏱ Temporal", "👁️ Shadow Filter", "📊 Impact Summary"
+        ])
+        
+        # ── SUB-TAB 1: Skeleton ──
+        with sub1:
+            if c2r and "skeleton" in c2r and c2r["skeleton"].get("image"):
+                st.image(base64.b64decode(c2r["skeleton"]["image"]), caption="YOLO-Pose Skeleton", width=400)
+                st.caption(f"Detected Type: **{c2r['skeleton'].get('detected_type', 'N/A')}** | Keypoints: {c2r['skeleton'].get('num_keypoints', 'N/A')} | Avg Confidence: {c2r['skeleton'].get('avg_confidence', 0):.2f}")
+            elif "c2_skeleton" in viz:
+                st.image(base64.b64decode(viz["c2_skeleton"]), caption="YOLO-Pose Skeleton", width=400)
+            else:
+                st.info("No skeleton data available.")
+        
+        # ── SUB-TAB 2: Scale Analysis (GAP 3) ──
+        with sub2:
+            if c2r and "scale_analysis" in c2r:
+                sa = c2r["scale_analysis"]
+                st.markdown(f"**GAP 3 — Multi-Scale LVM Oracle**")
+                
+                # Score method badge
+                score_method = sa.get("score_method", "Unknown")
+                method_color = "#a78bfa" if "LVM" in score_method else "#38bdf8"
+                st.markdown(f"""
+                <span style="background:{method_color}22;color:{method_color};padding:3px 12px;border-radius:4px;font-size:12px;font-weight:700;border:1px solid {method_color}44;">{score_method}</span>
+                """, unsafe_allow_html=True)
+                
+                # Scale Pyramid Images
+                pyramid_imgs = sa.get("pyramid_images", [])
+                scales = sa.get("scales", [])
+                lvm_scores = sa.get("lvm_scores", [])
+                best_idx = sa.get("best_index", -1)
+                
+                if pyramid_imgs and len(pyramid_imgs) > 0:
+                    # Dark container with scale images
+                    cols_py = st.columns(len(pyramid_imgs))
+                    for i, (col, img_b64) in enumerate(zip(cols_py, pyramid_imgs)):
+                        with col:
+                            label = f"σ={scales[i]}" if i < len(scales) else f"σ=?"
+                            if img_b64:
+                                st.image(base64.b64decode(img_b64), caption=label, use_container_width=True)
+                            score = lvm_scores[i] if i < len(lvm_scores) else 0
+                            bar_color = "🟨" if i == best_idx else "🟦"
+                            st.markdown(f"{bar_color} **{score:.4f}**")
+                    
+                    st.caption("Scale Pyramid + Coherence Scores")
+                
+                # Metrics
+                col_a, col_b, col_c = st.columns(3)
+                col_a.metric("Optimal Scale σ*", f"{sa.get('optimal_sigma', 'N/A')}")
+                col_b.metric("Confidence Margin", f"{sa.get('confidence_margin', 0):.3f}")
+                col_c.metric("Scoring Method", score_method.split("(")[0].strip())
+                
+                # Summary callout
+                summary = sa.get("summary", "")
+                if summary:
+                    st.info(summary)
+            else:
+                st.info("Scale analysis data not available.")
+        
+        # ── SUB-TAB 3: 3D Reconstruction (GAP 1) ──
+        with sub3:
+            if c2r and "reconstruction_3d" in c2r:
+                r3d = c2r["reconstruction_3d"]
+                st.markdown(f"**GAP 1 — Bayesian 3D Reconstruction**")
+                
+                # Confidence Gauge using Plotly
+                conf_val = r3d.get("confidence", 0)
+                fig = go.Figure(go.Indicator(
+                    mode="gauge+number",
+                    value=conf_val,
+                    number={'suffix': '', 'font': {'size': 36, 'color': 'white'}},
+                    title={'text': 'Confidence', 'font': {'size': 14, 'color': '#aaa'}},
+                    gauge={
+                        'axis': {'range': [0, 1], 'tickwidth': 1, 'tickcolor': '#555'},
+                        'bar': {'color': '#ff4444'},
+                        'bgcolor': '#333',
+                        'borderwidth': 0,
+                        'steps': [
+                            {'range': [0, 0.3], 'color': '#442222'},
+                            {'range': [0.3, 0.7], 'color': '#444422'},
+                            {'range': [0.7, 1.0], 'color': '#224422'}
+                        ],
+                    }
+                ))
+                occ_text = r3d.get("occlusion_risk", "N/A")
+                fig.add_annotation(
+                    text=f"Occlusion: {occ_text}",
+                    x=0.5, y=0.35, showarrow=False,
+                    font=dict(size=12, color='#ff6666' if occ_text == 'HIGH' else '#66ff66')
+                )
+                hour_hand_label = r3d.get("hour_hand", "N/A")
+                fig.add_annotation(
+                    text=f"hour: {hour_hand_label}",
+                    x=0.15, y=0.55, showarrow=False,
+                    font=dict(size=10, color='#aaa')
+                )
+                fig.update_layout(
+                    paper_bgcolor='#1a1a2e',
+                    plot_bgcolor='#1a1a2e',
+                    height=250,
+                    margin=dict(t=40, b=10, l=40, r=40),
+                )
+                st.plotly_chart(fig, use_container_width=False)
+                st.caption("Confidence Gauge")
+                
+                # Metrics row
+                mc1, mc2, mc3 = st.columns(3)
+                mc1.metric("Confidence", f"{conf_val:.3f}")
+                mc2.metric("Occlusion Risk", occ_text)
+                mc3.metric("Hour Hand", hour_hand_label)
+                
+                # Depth estimates (collapsible)
+                depth = r3d.get("depth_estimates", {})
+                if depth:
+                    with st.expander("Depth Estimates"):
+                        for key, val in depth.items():
+                            st.markdown(f"**{key}**: Distance = {val['distance_px']}px, Depth = {val['estimated_depth']}")
+            else:
+                st.info("3D reconstruction data not available.")
+        
+        # ── SUB-TAB 4: Manifold (GAP 4) ──
+        with sub4:
+            if c2r and "manifold" in c2r:
+                mf = c2r["manifold"]
+                st.markdown(f"**GAP 4 — Non-Euclidean Manifold Skeleton**")
+                
+                # Manifold visualization image
+                if mf.get("manifold_image"):
+                    st.image(base64.b64decode(mf["manifold_image"]), use_container_width=True)
+                
+                # Curvature data table
+                curvature = mf.get("curvature", {})
+                if curvature:
+                    st.markdown("#### Curvature Analysis")
+                    for key, val in curvature.items():
+                        col_e, col_g, col_r = st.columns(3)
+                        col_e.markdown(f"**{key}**")
+                        col_g.markdown(f"Euclid: **{int(val['euclid_px'])}px** → Geodesic: **{int(val['geodesic_px'])}px**")
+                        ratio_color = "red" if val['ratio'] > 1.3 else "green"
+                        col_r.markdown(f"Ratio: <span style='color:{ratio_color};font-weight:bold'>{val['ratio']}</span>", unsafe_allow_html=True)
+            else:
+                st.info("Manifold data not available.")
+        
+        # ── SUB-TAB 5: Temporal (GAP 2) ──
+        with sub5:
+            if c2r and "temporal" in c2r:
+                tp = c2r["temporal"]
+                st.markdown(f"**GAP 2 — Persistent Homology Tracking**")
+                
+                # Topology status badge
+                status = tp.get("status", "UNKNOWN")
+                badge_color = "#00cc66" if status == "NOMINAL" else ("#ffaa00" if status == "OVERLAP" else "#ff4444")
+                st.markdown(f"""
+                <div style="background:#1a1a2e;padding:15px;border-radius:10px;display:inline-flex;align-items:center;gap:15px;margin-bottom:20px;">
+                    <div style="text-align:center;padding:8px 15px;background:#222;border-radius:5px;">
+                        <div style="color:#888;font-size:11px;">β₀</div>
+                        <div style="color:white;font-size:28px;font-weight:bold;">{tp.get('beta_0', '?')}</div>
+                    </div>
+                    <div style="text-align:center;padding:8px 15px;background:#222;border-radius:5px;">
+                        <div style="color:#888;font-size:11px;">β₁</div>
+                        <div style="color:white;font-size:28px;font-weight:bold;">{tp.get('beta_1', '?')}</div>
+                    </div>
+                    <div style="background:{badge_color};color:white;padding:8px 20px;border-radius:5px;font-weight:bold;font-size:16px;">
+                        {status}
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+                st.caption("Topology Status")
+                
+                # Metrics
+                tc1, tc2, tc3 = st.columns(3)
+                tc1.metric("β₀ (Components)", tp.get("beta_0", "?"))
+                tc2.metric("β₁ (Loops)", tp.get("beta_1", "?"))
+                tc3.metric("Status", status)
+            else:
+                st.info("Temporal data not available.")
+        
+        # ── SUB-TAB 6: Shadow Filter (GAP 5) ──
+        with sub6:
+            if c2r and "shadow_filter" in c2r and c2r["shadow_filter"].get("available"):
+                sf = c2r["shadow_filter"]
+                st.markdown(f"**GAP 5 — Semantic Shadow Filter**")
+                
+                # Method badge
+                method = sf.get("method", "N/A")
+                method_color = "#a78bfa" if "LVM" in method else "#38bdf8"
+                st.markdown(f"""
+                <div style="display:inline-flex;gap:10px;margin-bottom:16px;">
+                    <span style="background:{method_color}22;color:{method_color};padding:3px 12px;border-radius:4px;font-size:12px;font-weight:700;border:1px solid {method_color}44;">{method}</span>
+                    <span style="background:#22c55e22;color:#22c55e;padding:3px 12px;border-radius:4px;font-size:12px;font-weight:700;border:1px solid #22c55e44;">τ = {sf['thresholds']['accept']} / {sf['thresholds']['reject']}</span>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                # Validation image
+                if "c2_shadow" in viz:
+                    st.image(base64.b64decode(viz["c2_shadow"]), caption="Shadow Validation (Green=REAL, Red=SHADOW, Yellow=UNCERTAIN)", use_container_width=True)
+                
+                # Metrics row
+                sc1, sc2, sc3 = st.columns(3)
+                sc1.metric("Accepted", f"{sf.get('accepted_count', 0)} / {sf.get('total', 0)}")
+                sc2.metric("Rejected (Shadows)", sf.get('rejected_count', 0))
+                shadow_conf = 1.0 / (1.0 + sf.get('rejected_count', 0))
+                sc3.metric("C4 Shadow Confidence", f"{shadow_conf:.3f}")
+                
+                # Per-candidate results
+                candidates = sf.get("candidates", [])
+                if candidates:
+                    st.markdown("---")
+                    st.markdown("#### Per-Candidate Validation")
+                    for i, cand in enumerate(candidates):
+                        decision = cand.get('decision', 'UNKNOWN')
+                        score = cand.get('weighted_score', 0)
+                        
+                        if decision == 'REAL':
+                            dec_color = '#22c55e'
+                            dec_icon = '✅'
+                        elif decision == 'SHADOW':
+                            dec_color = '#ef4444'
+                            dec_icon = '❌'
+                        else:
+                            dec_color = '#f59e0b'
+                            dec_icon = '⚠️'
+                        
+                        st.markdown(f"""
+                        <div style="background:#0f1117;border:1px solid {dec_color}33;border-radius:8px;padding:12px 16px;margin-bottom:10px;">
+                            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                                <span style="font-size:14px;font-weight:700;color:{dec_color};">{dec_icon} Candidate {i+1}: {decision}</span>
+                                <span style="font-size:20px;font-weight:800;color:{dec_color};">{score:.4f}</span>
+                            </div>
+                            <div style="font-size:11px;color:#94a3b8;">{cand.get('reasoning', '')}</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                        
+                        # Score breakdown
+                        scores = cand.get('scores', {})
+                        if scores:
+                            score_cols = st.columns(4)
+                            dims = [
+                                ('origin_alignment', 'Origin', 0.35, '#f59e0b'),
+                                ('geometry_coherence', 'Geometry', 0.30, '#22c55e'),
+                                ('length_plausibility', 'Length', 0.20, '#38bdf8'),
+                                ('shadow_offset_penalty', 'Shadow', 0.15, '#a78bfa'),
+                            ]
+                            for col, (key, label, weight, color) in zip(score_cols, dims):
+                                val = scores.get(key, 0)
+                                col.markdown(f"""
+                                <div style="text-align:center;">
+                                    <div style="font-size:10px;color:#64748b;">{label} (w={weight})</div>
+                                    <div style="font-size:18px;font-weight:700;color:{color};">{val:.3f}</div>
+                                </div>
+                                """, unsafe_allow_html=True)
+                
+                # Threshold legend
+                st.markdown("---")
+                st.markdown("#### Decision Thresholds")
+                thresh_cols = st.columns(3)
+                thresh_cols[0].markdown("""
+                <div style="background:#22c55e11;border:1px solid #22c55e33;border-radius:6px;padding:10px;text-align:center;">
+                    <div style="font-size:18px;font-weight:800;color:#22c55e;">≥ 0.72</div>
+                    <div style="font-size:11px;color:#22c55e;">REAL — Accept</div>
+                </div>""", unsafe_allow_html=True)
+                thresh_cols[1].markdown("""
+                <div style="background:#f59e0b11;border:1px solid #f59e0b33;border-radius:6px;padding:10px;text-align:center;">
+                    <div style="font-size:18px;font-weight:800;color:#f59e0b;">0.43–0.71</div>
+                    <div style="font-size:11px;color:#f59e0b;">UNCERTAIN</div>
+                </div>""", unsafe_allow_html=True)
+                thresh_cols[2].markdown("""
+                <div style="background:#ef444411;border:1px solid #ef444433;border-radius:6px;padding:10px;text-align:center;">
+                    <div style="font-size:18px;font-weight:800;color:#ef4444;">≤ 0.42</div>
+                    <div style="font-size:11px;color:#ef4444;">SHADOW — Reject</div>
+                </div>""", unsafe_allow_html=True)
+            else:
+                st.info("Shadow filter data not available. Ensure the analysis pipeline ran successfully.")
+        
+        # ── SUB-TAB 7: Impact Summary ──
+        with sub7:
+            if c2r and "impact_summary" in c2r:
+                imp = c2r["impact_summary"]
+                st.markdown(f"**Research Impact Summary**")
+                
+                # Gap table
+                gaps = imp.get("gaps", [])
+                if gaps:
+                    gap_df = pd.DataFrame(gaps)
+                    st.dataframe(gap_df, use_container_width=True, hide_index=True)
+                
+                # Overall metrics
+                ic1, ic2 = st.columns(2)
+                ic1.metric("Active Research Gaps", f"{imp.get('num_active_gaps', 0)} / {len(gaps)}")
+                ic2.metric("Confidence Boost", f"+{imp.get('overall_confidence_boost', 0):.3f}")
+                
+                st.success(f"All {imp.get('num_active_gaps', 0)} research components are actively enhancing the {imp.get('detected_type', 'instrument')} analysis pipeline.")
+            else:
+                st.info("Impact summary not available.")
     with tab3:
         st.markdown(f"{icon('psychology')} **Angle Predictions**", unsafe_allow_html=True)
         col_a, col_b = st.columns(2)
