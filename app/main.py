@@ -101,14 +101,17 @@ async def analyze_image(
         # Remove raw arrays from result
         result.pop("visualizations", None)
     
-    # Handle Heatmap (C3 XAI)
+    # Handle Heatmap (C3 XAI — already uint8 from GradCAM++ overlay)
     heatmap_b64 = None
     if result.get("heatmap") is not None:
-        if isinstance(result["heatmap"], np.ndarray):
-            heatmap_uint8 = (result["heatmap"] * 255).astype(np.uint8)
-            _, buffer = cv2.imencode('.jpg', heatmap_uint8)
+        hm = result["heatmap"]
+        if isinstance(hm, np.ndarray) and hm.size > 0:
+            # GradCAM++ returns uint8 [0,255] directly; old path may return float [0,1]
+            if hm.dtype != np.uint8:
+                hm = (np.clip(hm, 0, 1) * 255).astype(np.uint8)
+            _, buffer = cv2.imencode('.jpg', hm)
             heatmap_b64 = base64.b64encode(buffer).decode('utf-8')
-        result.pop("heatmap", None) # Always remove raw array/none
+        result.pop("heatmap", None)
     
     # 3. Final Sanitization (Deep convert numpy types to python types)
     clean_result = sanitize_result(result)

@@ -757,7 +757,9 @@ class HARPEngine:
                 refined_angles = []
                 heatmaps = []
                 c3_crops = []
-                
+                xai_explanations = []   # structured XAI results per hand
+                per_hand_xai = []       # per-hand uncertainty + alpha data
+
                 for i, (tip, rough_angle) in enumerate(zip([tip1, tip2], [a1, a2])):
                     crop = self._get_crop(target_crop, center, rough_angle)
                     if crop.size == 0:
@@ -779,12 +781,20 @@ class HARPEngine:
                     delta = c3_angle - 360 if c3_angle > 180 else c3_angle
 
                     # L4 — AdaptiveSemanticRouter (L2 or L3 based on entropy)
-                    if self.adaptive_router and force_expert:
+                    if self.adaptive_router:
                         xai_explanation, routing_reason, entropy_val = self.adaptive_router.route(
                             raw_cam, crop, hand_heatmap_vis,
                             c3_angle, hand_type=f"Hand {i+1}"
                         )
-                        debug_info.append(f"XAI Hand {i+1}: {xai_explanation}")
+                        source = "Gemini" if "[Gemini]" in xai_explanation else "Local"
+                        xai_explanations.append({
+                            "hand": i + 1,
+                            "source": source,
+                            "explanation": xai_explanation,
+                            "routing_reason": routing_reason,
+                            "entropy": round(entropy_val, 3),
+                        })
+                        debug_info.append(f"XAI Hand {i+1} [{source}]: {xai_explanation}")
                         debug_info.append(f"XAI Routing (H{i+1}): {routing_reason}")
                     else:
                         entropy_val = compute_entropy(raw_cam) if raw_cam is not None else 0.0
@@ -819,6 +829,17 @@ class HARPEngine:
 
                     # Adaptive blend α = clip(1 − σ/20, 0, 1)
                     alpha = float(np.clip(1.0 - (uncertainty_std / 20.0), 0.0, 1.0))
+
+                    # Store per-hand XAI data for dedicated UI panels
+                    per_hand_xai.append({
+                        "hand": i + 1,
+                        "c3_angle": round(c3_angle, 2),
+                        "rough_angle": round(rough_angle, 2),
+                        "delta": round(delta, 2),
+                        "uncertainty_std": round(uncertainty_std, 2),
+                        "alpha": round(alpha, 3),
+                        "entropy": round(entropy_val, 3),
+                    })
 
                     if abs(delta) > 20.0:
                         debug_info.append(
@@ -915,6 +936,8 @@ class HARPEngine:
                     "uncertainty_deg": uncertainty_summary,
                     "xai_method": "GradCAM++ (L2+L3+L4 multi-layer) + MC-Dropout",
                     "contrastive_xai": contrastive_text,
+                    "xai_explanations": xai_explanations,   # L2/L3 per-hand text
+                    "per_hand_xai": per_hand_xai,           # uncertainty + alpha per hand
                 }
 
 # Alias mapping so you don't break existing `main.py` imports

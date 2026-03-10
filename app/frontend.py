@@ -683,6 +683,129 @@ def display_results(data):
                         f"{line}</div>",
                         unsafe_allow_html=True
                     )
+
+            # ══════════════════════════════════════════════════════════════════
+            # 🔵  AI MODEL EXPLANATIONS (LocalExplainer / Gemini per hand)
+            # ══════════════════════════════════════════════════════════════════
+            xai_exps = res.get("xai_explanations", [])
+            if xai_exps:
+                st.markdown("---")
+                st.markdown(
+                    f"#### {icon('psychology')} AI Model Explanations",
+                    unsafe_allow_html=True
+                )
+                for exp in xai_exps:
+                    h_num   = exp.get("hand", "?")
+                    source  = exp.get("source", "Local")
+                    text    = exp.get("explanation", "")
+                    entropy = exp.get("entropy", 0.0)
+                    routing = exp.get("routing_reason", "")
+
+                    if source == "Gemini":
+                        badge_color, badge_icon, badge_label = "#a78bfa", "✨", "Gemini Vision"
+                    else:
+                        badge_color, badge_icon, badge_label = "#38bdf8", "🔵", "Local Heuristic"
+
+                    st.markdown(f"""
+                    <div style="background:#0f0f1a;border:1px solid {badge_color}33;
+                                border-radius:10px;padding:14px 16px;margin-bottom:10px;">
+                        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+                            <span style="background:{badge_color}22;color:{badge_color};
+                                         padding:2px 10px;border-radius:4px;font-size:11px;
+                                         font-weight:700;border:1px solid {badge_color}44;">
+                                {badge_icon} {badge_label}
+                            </span>
+                            <span style="color:#94a3b8;font-size:12px;">Hand {h_num}</span>
+                            <span style="color:#64748b;font-size:11px;margin-left:auto;">
+                                entropy={entropy:.3f}
+                            </span>
+                        </div>
+                        <div style="color:#e2e8f0;font-size:13px;line-height:1.5;">{text}</div>
+                        <div style="color:#475569;font-size:10px;margin-top:6px;">
+                            Routing: {routing}
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+            # ══════════════════════════════════════════════════════════════════
+            # 📊  C3 UNCERTAINTY  (MC Dropout per hand)
+            # ══════════════════════════════════════════════════════════════════
+            per_hand = res.get("per_hand_xai", [])
+            if per_hand:
+                st.markdown("---")
+                st.markdown(
+                    f"#### {icon('analytics')} C3 Uncertainty — MC Dropout (20 passes)",
+                    unsafe_allow_html=True
+                )
+                cols = st.columns(len(per_hand))
+                for col, h in zip(cols, per_hand):
+                    sig   = h.get("uncertainty_std", 0.0)
+                    alpha = h.get("alpha", 1.0)
+                    delta = h.get("delta", 0.0)
+                    c3a   = h.get("c3_angle", 0.0)
+                    raw_a = h.get("rough_angle", 0.0)
+                    ent   = h.get("entropy", 0.0)
+
+                    if sig < 5.0:
+                        sc, sg = "#22c55e", "High Confidence"
+                    elif sig < 15.0:
+                        sc, sg = "#f59e0b", "Moderate"
+                    else:
+                        sc, sg = "#ef4444", "Low — C2 preferred"
+
+                    col.markdown(f"""
+                    <div style="background:#0f0f1a;border:1px solid {sc}44;
+                                border-radius:10px;padding:12px;text-align:center;">
+                        <div style="color:#94a3b8;font-size:10px;">Hand {h.get('hand','?')}</div>
+                        <div style="color:{sc};font-size:26px;font-weight:800;margin:4px 0;">
+                            ±{sig:.1f}°
+                        </div>
+                        <div style="color:#64748b;font-size:10px;">{sg}</div>
+                        <div style="margin:8px 0;background:#1e293b;border-radius:3px;height:5px;">
+                            <div style="width:{int(alpha*100)}%;height:5px;
+                                        background:{sc};border-radius:3px;"></div>
+                        </div>
+                        <div style="color:#64748b;font-size:10px;">α = {alpha:.2f}</div>
+                        <div style="color:#475569;font-size:10px;margin-top:4px;">
+                            C2={raw_a:.1f}° → C3={c3a:.1f}° (δ={delta:+.1f}°)
+                        </div>
+                        <div style="color:#334155;font-size:10px;">entropy={ent:.3f}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+            # ══════════════════════════════════════════════════════════════════
+            # 🔍  FULL PIPELINE DEBUG LOG
+            # ══════════════════════════════════════════════════════════════════
+            debug_lines = res.get("debug", [])
+            if debug_lines:
+                st.markdown("---")
+                with st.expander(
+                    f"🔍 Full Pipeline Debug Log  ({len(debug_lines)} steps)", expanded=False
+                ):
+                    def _icon_for(line: str) -> str:
+                        l = line.lower()
+                        if any(k in l for k in ["error", "failed", "rejected", "❌"]):
+                            return "🔴"
+                        if any(k in l for k in ["warning", "⚠", "slow", "ambiguity"]):
+                            return "⚠️"
+                        if any(k in l for k in ["xai", "gemini", "local xai", "entropy"]):
+                            return "🔵"
+                        if any(k in l for k in ["accepted", "✅", "ok", "success", "passed"]):
+                            return "✅"
+                        if any(k in l for k in ["c1:", "c2", "c3", "c4", "physics"]):
+                            return "🟢"
+                        return "▪️"
+
+                    for step_i, line in enumerate(debug_lines, 1):
+                        badge = _icon_for(line)
+                        st.markdown(
+                            f"<div style='font-family:monospace;font-size:11px;"
+                            f"padding:2px 6px;border-radius:3px;margin:1px 0;"
+                            f"color:#94a3b8;background:#0a0a14;'>"
+                            f"<span style='color:#475569;'>[{step_i:02d}]</span> "
+                            f"{badge} {line}</div>",
+                            unsafe_allow_html=True
+                        )
         else:
             st.info("Expert AI skipped (Fast Path or Gauge Mode). Enable 'Force Expert Path' to activate XAI.")
 
