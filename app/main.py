@@ -113,10 +113,16 @@ async def analyze_image(
     # 3. Final Sanitization (Deep convert numpy types to python types)
     clean_result = sanitize_result(result)
     
+    # Handle C2 Research images (convert numpy arrays to base64)
+    c2_research_b64 = None
+    if result.get("c2_research"):
+        c2_research_b64 = _serialize_c2_research(result.pop("c2_research"))
+    
     return {
         "result": clean_result,
         "visualizations": viz_base64,
         "heatmap_b64": heatmap_b64,
+        "c2_research": c2_research_b64,
         "processing_time": processing_time
     }
 
@@ -138,6 +144,33 @@ async def identify_type(file: UploadFile = File(...)):
         
     return {"type": "clock" if c_conf > g_conf else "gauge"}
 
+
+def _serialize_c2_research(data):
+    """Convert any numpy image arrays in c2_research dict to base64 strings."""
+    if data is None:
+        return None
+    
+    def _encode_img(img):
+        if isinstance(img, np.ndarray) and img.size > 0:
+            _, buffer = cv2.imencode('.jpg', img)
+            return base64.b64encode(buffer).decode('utf-8')
+        return None
+
+    # Skeleton image
+    if 'skeleton' in data and 'image' in data['skeleton']:
+        data['skeleton']['image'] = _encode_img(data['skeleton']['image'])
+    
+    # Scale pyramid images
+    if 'scale_analysis' in data and 'pyramid_images' in data['scale_analysis']:
+        data['scale_analysis']['pyramid_images'] = [
+            _encode_img(img) for img in data['scale_analysis']['pyramid_images']
+        ]
+    
+    # Manifold image
+    if 'manifold' in data and 'manifold_image' in data['manifold']:
+        data['manifold']['manifold_image'] = _encode_img(data['manifold']['manifold_image'])
+    
+    return data
 
 # --- COMPARATOR ENDPOINT ---
 @app.post("/compare_times")

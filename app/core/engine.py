@@ -10,6 +10,8 @@ from ultralytics import YOLO
 from PIL import Image
 from app.core.xai import XaiVisualizer, SemanticExplainer
 from app.core.metrics import calculate_gauge_reading, calculate_gauge_reading_advanced
+from app.core.c2_research import C2ResearchAnalyzer
+from app.core.c2_shadow_filter import SemanticShadowFilter
 import google.generativeai as genai
 import easyocr
 from dotenv import load_dotenv
@@ -61,6 +63,10 @@ class HARPEngine:
             self.c3_model = None
             self.explainer = None
         
+        # --- [C2] Research Analyzer ---
+        self.c2_research = C2ResearchAnalyzer()
+        self.c2_shadow_filter = SemanticShadowFilter()
+
         print("Loading EasyOCR Fallback...")
         self.reader = easyocr.Reader(['en'], gpu=torch.cuda.is_available())
 
@@ -490,6 +496,25 @@ class HARPEngine:
             visualizations['c2_skeleton'] = self._draw_gauge_skeleton(target_crop, center, min_pt, max_pt, tip, parsed_min, parsed_max)
             visualizations['c3_angles'] = self._draw_gauge_angles(target_crop, center, min_pt, max_pt, tip, span, needle)
             
+            # --- C2 Shadow Filter ---
+            shadow_results = []
+            try:
+                candidates = [kpts[i] for i in range(1, min(4, len(kpts)))]
+                shadow_results = self.c2_shadow_filter.filter_keypoints(target_crop, center, candidates)
+                shadow_viz = self.c2_shadow_filter.render_validation_image(target_crop, center, shadow_results)
+                visualizations['c2_shadow'] = shadow_viz
+                debug_info.append(f"Shadow Filter: {sum(1 for r in shadow_results if r.accepted)}/{len(shadow_results)} accepted")
+            except Exception as e:
+                debug_info.append(f"Shadow Filter Error: {e}")
+
+            # --- C2 Research Analysis ---
+            try:
+                c2_research_data = self.c2_research.analyze(target_crop, kpts, detected_type='gauge',
+                                                            shadow_results=shadow_results)
+            except Exception as e:
+                c2_research_data = None
+                debug_info.append(f"C2 Research Error: {e}")
+
             return {
                 "time": time_str,
                 "method": method_str,
@@ -506,7 +531,8 @@ class HARPEngine:
                 "c1_clock_conf": float(c_conf) if c_conf != -1.0 else 0.0,
                 "c1_gauge_conf": float(g_conf) if g_conf != -1.0 else 0.0,
                 "c1_clock_quality": c_quality,
-                "c1_gauge_quality": g_quality
+                "c1_gauge_quality": g_quality,
+                "c2_research": c2_research_data
             }
 
         # ==========================================
@@ -521,6 +547,25 @@ class HARPEngine:
             
             visualizations['c2_skeleton'] = self._draw_skeleton(target_crop, center, tip1, tip2)
             visualizations['c3_angles'] = self._draw_angles_on_img(target_crop, center, tip1, tip2, a1, a2)
+            
+            # --- C2 Shadow Filter ---
+            shadow_results = []
+            try:
+                candidates = [kpts[i] for i in range(1, min(3, len(kpts)))]
+                shadow_results = self.c2_shadow_filter.filter_keypoints(target_crop, center, candidates)
+                shadow_viz = self.c2_shadow_filter.render_validation_image(target_crop, center, shadow_results)
+                visualizations['c2_shadow'] = shadow_viz
+                debug_info.append(f"Shadow Filter: {sum(1 for r in shadow_results if r.accepted)}/{len(shadow_results)} accepted")
+            except Exception as e:
+                debug_info.append(f"Shadow Filter Error: {e}")
+
+            # --- C2 Research Analysis ---
+            try:
+                c2_research_data = self.c2_research.analyze(target_crop, kpts, detected_type='clock',
+                                                            shadow_results=shadow_results)
+            except Exception as e:
+                c2_research_data = None
+                debug_info.append(f"C2 Research Error: {e}")
             
             h, m, error = self._solve_physics(a1, a2)
             
@@ -551,7 +596,8 @@ class HARPEngine:
                     "c1_clock_conf": float(c_conf) if c_conf != -1.0 else 0.0,
                     "c1_gauge_conf": float(g_conf) if g_conf != -1.0 else 0.0,
                     "c1_clock_quality": c_quality,
-                    "c1_gauge_quality": g_quality
+                    "c1_gauge_quality": g_quality,
+                    "c2_research": c2_research_data
                 }
             
             # --- [C3] CLOCK EXPERT PATH ---
@@ -632,7 +678,8 @@ class HARPEngine:
                     "c1_clock_conf": float(c_conf) if c_conf != -1.0 else 0.0,
                     "c1_gauge_conf": float(g_conf) if g_conf != -1.0 else 0.0,
                     "c1_clock_quality": c_quality,
-                    "c1_gauge_quality": g_quality
+                    "c1_gauge_quality": g_quality,
+                    "c2_research": c2_research_data
                 }
 
 # Alias mapping so you don't break existing `main.py` imports 
