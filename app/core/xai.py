@@ -177,6 +177,43 @@ class LocalExplainer:
             f"(peak activation={peak_mag:.2f}, entropy={entropy:.2f})."
         )
 
+    def annotate_quadrant(self, vis_img: np.ndarray,
+                          raw_heatmap: np.ndarray) -> np.ndarray:
+        """
+        Draw a semi-transparent coloured rectangle over the peak-activation quadrant
+        on the GradCAM++ overlay image.
+
+        Args:
+            vis_img:     GradCAM++ overlay, uint8 (H, W, 3) RGB
+            raw_heatmap: Raw fused attention map, float32 (H, W) in [0, 1]
+
+        Returns:
+            Annotated image, uint8 (H, W, 3) RGB
+        """
+        if raw_heatmap is None or vis_img is None:
+            return vis_img
+
+        h, w = raw_heatmap.shape[:2]
+        peak_y, peak_x = np.unravel_index(np.argmax(raw_heatmap), (h, w))
+
+        # Determine which quadrant the peak is in
+        qr = (0 if peak_x < w // 2 else 1)
+        qc = (0 if peak_y < h // 2 else 1)
+
+        x1 = qr * (w // 2)
+        y1 = qc * (h // 2)
+        x2 = x1 + w // 2
+        y2 = y1 + h // 2
+
+        overlay = vis_img.copy()
+        # Filled semi-transparent yellow rectangle
+        cv2.rectangle(overlay, (x1, y1), (x2, y2), (255, 230, 0), -1)
+        # Blend with alpha=0.25
+        annotated = cv2.addWeighted(overlay, 0.25, vis_img, 0.75, 0)
+        # Solid border
+        cv2.rectangle(annotated, (x1, y1), (x2, y2), (255, 200, 0), 1)
+        return annotated
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # LAYER 3 — SemanticExplainer (Gemini Vision LLM)
@@ -464,3 +501,178 @@ class ShapExplainer:
         except Exception as e:
             print(f"⚠️  SHAP explanation failed: {e}")
             return None
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+class IntegratedGradientsExplainer:
+    """
+    Layer 1.5 — Integrated Gradients (IG) for regression attribution.
+
+    Theoretically rigorous alternative to GradCAM++ that satisfies:
+      - Completeness:  sum of attributions == f(x) - f(baseline)
+      - Sensitivity:  if f changes on a feature, attribution != 0
+      - Implementation Invariance: independent of network parameterisation
+
+    Reference: Sundararajan et al., "Axiomatic Attribution for Deep Networks"
+               (ICML 2017)
+
+    Process:
+        1. Interpolate between black baseline and input in n_steps steps
+        2. Compute gradient of the scalar output w.r.t. the input at each step
+        3. Average gradients (trapezoidal rule) and multiply by (input - baseline)
+
+    Returns: (ig_overlay uint8 HxWx3, raw_attribution float32 HxW)
+    """
+
+    def __init__(self, n_steps: int = 50):
+        self.n_steps = n_steps
+
+    def explain(self, model: nn.Module, input_tensor: torch.Tensor,
+                norm_image: np.ndarray,
+                baseline: torch.Tensor | None = None) -> tuple[np.ndarray, np.ndarray] | tuple[None, None]:
+        """
+        Args:
+            model:        The C3 model (nn.Sequential[ResNet18, Sigmoid])
+            input_tensor: (1, 3, 64, 64) normalised tensor (requires_grad will be set)
+            norm_image:   (64, 64, 3) float32 [0, 1] for overlay
+            baseline:     (1, 3, 64, 64) baseline; default = zero tensor (black image)
+
+        Returns:
+            ig_overlay uint8 (H, W, 3)  — JET colourmap attribution on image
+            raw_attr   float32 (H, W)   — per-pixel mean absolute attribution
+        """
+        try:
+            device = next(model.parameters()).device
+            if baseline is None:
+                baseline = torch.zeros_like(input_tensor).to(device)
+
+            input_tensor = input_tensor.to(device)
+            delta = input_tensor - baseline    # (1, 3, 64, 64)
+
+            # Build interpolated inputs
+            alphas = torch.linspace(0, 1, self.n_steps, device=device)  # (n_steps,)
+            # (n_steps, 3, 64, 64)
+            interp = baseline + alphas[:, None, None, None] * delta.squeeze(0)
+            interp = interp.requires_grad_(True)
+
+            # Forward pass on all steps at once
+            # Model expects (B, 3, 64, 64); output is (n_steps, 1) after Sigmoid
+            model.eval()
+            out = model(interp)   # (n_steps, 1)
+            scalar = out.sum()    # single scalar for backward
+            scalar.backward()
+
+            grads = interp.grad   # (n_steps, 3, 64, 64)
+
+            # Trapezoidal integration: avg gradients over interpolation steps
+            avg_grads = grads.mean(dim=0)   # (3, 64, 64)
+
+            # IG attribution = avg_grad * (input - baseline)
+            ig_attr = (avg_grads * delta.squeeze(0)).detach().cpu().numpy()  # (3, H, W)
+
+            # Aggregate across channels (mean absolute)
+            raw_attr = np.abs(ig_attr).mean(axis=0)   # (H, W)
+
+            # Normalise → JET colourmap + overlay
+            raw_norm = raw_attr - raw_attr.min()
+            if raw_norm.max() > 0:
+                raw_norm = raw_norm / raw_norm.max()
+
+            ig_u8  = (raw_norm * 255).astype(np.uint8)
+            ig_jet = cv2.applyColorMap(ig_u8, cv2.COLORMAP_HOT)         # HOT for IG
+            ig_rgb = cv2.cvtColor(ig_jet, cv2.COLOR_BGR2RGB)            # (H, W, 3)
+
+            # Blend with original image
+            base_u8 = (norm_image * 255).astype(np.uint8)
+            ig_overlay = cv2.addWeighted(ig_rgb, 0.65, base_u8, 0.35, 0)
+
+            return ig_overlay, raw_attr
+
+        except Exception as e:
+            print(f"⚠️  Integrated Gradients failed: {e}")
+            return None, None
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+class ROARFidelityScorer:
+    """
+    ROAR-inspired Attribution Fidelity Score (AFS) for C3 regression.
+
+    Checks whether the GradCAM++/IG heatmap is *causally* responsible
+    for the angle prediction by masking the top-k% of highest-attribution
+    pixels and measuring the prediction shift.
+
+    AFS = |original_angle - masked_angle| / 180  (normalised to [0, 1])
+
+    AFS close to 1.0 → heatmap IS causal (masking breaks the prediction)
+    AFS close to 0.0 → heatmap is NOT causal (model ignores those pixels)
+
+    Reference: Hooker et al., "A Benchmark for Interpretability Methods
+               in Deep Neural Networks" (NeurIPS 2019)
+    """
+
+    def __init__(self, mask_fraction: float = 0.20):
+        """
+        Args:
+            mask_fraction: fraction of top-attribution pixels to blank (default 20%)
+        """
+        self.mask_fraction = mask_fraction
+
+    def score(self, model: nn.Module, input_tensor: torch.Tensor,
+              raw_heatmap: np.ndarray,
+              original_angle_deg: float) -> dict:
+        """
+        Args:
+            model:              C3 model
+            input_tensor:       (1, 3, 64, 64) normalised tensor
+            raw_heatmap:        float32 (H, W) GradCAM++/IG attribution in [0, 1]
+            original_angle_deg: the prediction on the unmasked image
+
+        Returns dict:
+            afs         (float) Attribution Fidelity Score ∈ [0, 1]
+            masked_angle (float) prediction after masking
+            delta_deg   (float) abs shift in degrees
+            n_pixels    (int)   number of pixels masked
+        """
+        try:
+            device   = next(model.parameters()).device
+            h, w     = raw_heatmap.shape[:2]
+            n_pixels = int(h * w * self.mask_fraction)
+
+            # Identify top-k pixel indices by attribution value
+            flat     = raw_heatmap.ravel()
+            top_idx  = np.argpartition(flat, -n_pixels)[-n_pixels:]  # (n_pixels,)
+
+            # Build binary mask (1 = keep, 0 = blank)
+            mask = np.ones(h * w, dtype=np.float32)
+            mask[top_idx] = 0.0
+            mask = mask.reshape(h, w)   # (H, W)
+
+            # Apply mask to all 3 channels
+            t_masked = input_tensor.clone().to(device)   # (1, 3, H, W)
+            mask_t   = torch.from_numpy(mask).to(device).unsqueeze(0).unsqueeze(0)  # (1,1,H,W)
+            t_masked = t_masked * mask_t
+
+            model.eval()
+            with torch.no_grad():
+                masked_raw = model(t_masked).item()   # Sigmoid in [0, 1]
+            masked_angle = masked_raw * 360.0
+
+            # Circular difference (wrap to ±180)
+            delta = abs(original_angle_deg - masked_angle)
+            delta = min(delta, 360.0 - delta)
+
+            # AFS: normalised by 180° (maximum possible circular difference)
+            afs = min(delta / 180.0, 1.0)
+
+            return {
+                "afs":          round(afs, 4),
+                "masked_angle": round(masked_angle, 2),
+                "delta_deg":    round(delta, 2),
+                "n_pixels":     n_pixels,
+                "mask_pct":     int(self.mask_fraction * 100),
+            }
+
+        except Exception as e:
+            print(f"⚠️  ROAR scoring failed: {e}")
+            return {"afs": 0.0, "masked_angle": 0.0, "delta_deg": 0.0, "n_pixels": 0}

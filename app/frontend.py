@@ -630,17 +630,52 @@ def display_results(data):
                 unsafe_allow_html=True
             )
 
-            # ── 3-tab XAI Heatmap Display ────────────────────────────────────
-            xai_t1, xai_t2, xai_t3 = st.tabs(["🔥 GradCAM++", "🟩 LIME", "🔴 SHAP"])
+            # ── 4-tab XAI Heatmap Display ────────────────────────────────────
+            xai_t1, xai_t2, xai_t3, xai_t4 = st.tabs(
+                ["🔥 GradCAM++", "🧮 Integrated Gradients", "🟩 LIME", "🔴 SHAP"]
+            )
 
             with xai_t1:
                 if data.get("heatmap_b64"):
                     st.image(base64.b64decode(data["heatmap_b64"]),
-                             caption="GradCAM++ — fused L2×0.20 + L3×0.30 + L4×0.50", width=380)
+                             caption="GradCAM++ — fused L2×0.20 + L3×0.30 + L4×0.50 + quadrant box",
+                             width=380)
+                    # ROAR AFS badge per hand
+                    afs_list = res.get("afs_scores", [])
+                    if afs_list:
+                        afs_cols = st.columns(len(afs_list))
+                        for ac, afs in zip(afs_cols, afs_list):
+                            afs_val = afs.get("afs", 0.0)
+                            afs_pct = int(afs_val * 100)
+                            afs_color = "#22c55e" if afs_val > 0.5 else "#f59e0b" if afs_val > 0.25 else "#ef4444"
+                            ac.markdown(
+                                f"<div style='text-align:center;'>"
+                                f"<div style='color:#64748b;font-size:10px;'>H{afs.get('mask_pct',20)}% masked → Δ{afs.get('delta_deg',0):.1f}°</div>"
+                                f"<div style='color:{afs_color};font-size:18px;font-weight:700;'>AFS {afs_pct}%</div>"
+                                f"<div style='color:#475569;font-size:9px;'>{'Causal ✅' if afs_val>0.5 else 'Weak causal ⚠️' if afs_val>0.25 else 'Not causal ❌'}</div>"
+                                f"</div>",
+                                unsafe_allow_html=True
+                            )
                 else:
                     st.info("GradCAM++ heatmap not available.")
 
             with xai_t2:
+                ig_found = False
+                for hi in range(1, 3):
+                    key = f"xai_ig_h{hi}"
+                    if key in viz and viz[key]:
+                        st.image(base64.b64decode(viz[key]),
+                                 caption=f"Integrated Gradients — Hand {hi} (HOT colourmap, 50 steps)",
+                                 width=300)
+                        ig_found = True
+                if not ig_found:
+                    st.info("IG overlay not available. Enable **Force Expert Path** to compute.")
+                st.caption(
+                    "IG satisfies Completeness • Sensitivity • Implementation Invariance "
+                    "(Sundararajan et al., ICML 2017) — theoretically grounded for regression."
+                )
+
+            with xai_t3:
                 lime_found = False
                 for hi in range(1, 3):
                     key = f"xai_lime_h{hi}"
@@ -651,7 +686,7 @@ def display_results(data):
                 if not lime_found:
                     st.info("LIME overlay not available. Run with `pip install lime` and Force Expert Path.")
 
-            with xai_t3:
+            with xai_t4:
                 shap_found = False
                 for hi in range(1, 3):
                     key = f"xai_shap_h{hi}"

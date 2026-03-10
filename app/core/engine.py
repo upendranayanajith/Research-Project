@@ -12,6 +12,7 @@ from app.core.xai import (
     XaiVisualizer, SemanticExplainer, LocalExplainer,
     AdaptiveSemanticRouter, ContrastiveExplainer,
     LimeExplainer, ShapExplainer, compute_entropy,
+    IntegratedGradientsExplainer, ROARFidelityScorer,
 )
 from app.core.metrics import calculate_gauge_reading, calculate_gauge_reading_advanced
 from app.core.c2_research import C2ResearchAnalyzer
@@ -69,26 +70,35 @@ class HARPEngine:
                 print(f"⚠️  C3 load: unexpected keys: {unexpected}")
             self.c3_model.eval()
 
-            # ── XAI Stack (all 7 layers) ──────────────────────────────────────
-            self.xai             = XaiVisualizer(self.c3_model[0])       # L1 GradCAM++
-            self.local_explainer = LocalExplainer()                      # L2 heuristic
-            self.explainer       = SemanticExplainer()                   # L3 Gemini VLM
-            self.adaptive_router = AdaptiveSemanticRouter(self.explainer) # L4 entropy gate
-            self.contrastive_xai = ContrastiveExplainer()                # L5 "Why not?"
-            self.lime_explainer  = LimeExplainer()                       # L6 superpixel
-            self.shap_explainer  = ShapExplainer()                       # L7 attribution
-            print(f"✅ XAI Stack loaded:")
-            print(f"   L1 GradCAM++ (multi-layer): {'✅' if self.xai.available else '⚠️ unavailable'}")
-            print(f"   L3 Gemini VLM: {'✅' if self.explainer.available else '⚠️ no API key'}")
-            print(f"   L4 Entropy router: threshold={AdaptiveSemanticRouter.ENTROPY_THRESHOLD}")
-            print(f"   L6 LIME: {'✅' if self.lime_explainer.available else '⚠️ pip install lime'}")
-            print(f"   L7 SHAP: {'✅' if self.shap_explainer.available else '⚠️ pip install shap'}")
+            # ── XAI Stack (all 7 layers + IG + ROAR) ──────────────────────────
+            self.xai             = XaiVisualizer(self.c3_model[0])        # L1  GradCAM++
+            self.ig_explainer    = IntegratedGradientsExplainer(n_steps=50) # L1.5 IG
+            self.roar_scorer     = ROARFidelityScorer(mask_fraction=0.20)   # ROAR AFS
+            self.local_explainer = LocalExplainer()                         # L2  heuristic
+            self.explainer       = SemanticExplainer()                      # L3  Gemini VLM
+            self.adaptive_router = AdaptiveSemanticRouter(self.explainer)   # L4  entropy gate
+            self.contrastive_xai = ContrastiveExplainer()                   # L5  "Why not?"
+            self.lime_explainer  = LimeExplainer()                          # L6  superpixel
+            self.shap_explainer  = ShapExplainer()                          # L7  attribution
+            self._c3_kalman: list[dict | None] = [None, None]              # per-hand Kalman
+            self._uncertainty_temperature: float = 1.0                     # temp scaling T
+            print("✅ XAI Stack loaded:")
+            print(f"   L1  GradCAM++ (multi-layer): {'✅' if self.xai.available else '⚠️ unavailable'}")
+            print("   L1.5 Integrated Gradients (50 steps): ✅")
+            print("   ROAR Fidelity Scorer (top-20%): ✅")
+            print(f"   L3  Gemini VLM: {'✅' if self.explainer.available else '⚠️ no API key'}")
+            print(f"   L4  Entropy router: threshold={AdaptiveSemanticRouter.ENTROPY_THRESHOLD}")
+            print(f"   L6  LIME: {'✅' if self.lime_explainer.available else '⚠️ pip install lime'}")
+            print(f"   L7  SHAP: {'✅' if self.shap_explainer.available else '⚠️ pip install shap'}")
         else:
             print("⚠️ WARNING: C3 weights not found.")
             self.c3_model = None
             self.xai = self.explainer = self.local_explainer = None
             self.adaptive_router = self.contrastive_xai = None
             self.lime_explainer  = self.shap_explainer  = None
+            self.ig_explainer    = self.roar_scorer      = None
+            self._c3_kalman = [None, None]
+            self._uncertainty_temperature = 1.0
         
         # --- [C2] Research Analyzer ---
         self.c2_research = C2ResearchAnalyzer()
@@ -112,13 +122,75 @@ class HARPEngine:
         """ResNet-18 with Dropout before the regression head for MC Dropout uncertainty."""
         backbone = models.resnet18(weights=None)
         num_ftrs = backbone.fc.in_features
-        # Replace FC with Dropout + Linear so MC Dropout works during inference
         backbone.fc = nn.Sequential(
             nn.Dropout(p=0.3),
             nn.Linear(num_ftrs, 1)
         )
         model = nn.Sequential(backbone, nn.Sigmoid())
         return model
+
+    # ─────────────────────────────────────────────────────────────────────────────
+    def _apply_temperature_scaling(self, sigma: float) -> float:
+        """
+        Apply temperature scaling to MC-Dropout uncertainty.
+        T > 1.0 → inflate uncertainty (model is over-confident)
+        T < 1.0 → shrink uncertainty (model is under-confident)
+        T = 1.0 → uncalibrated (default)
+        """
+        return sigma * self._uncertainty_temperature
+
+    def _smooth_c3_angle(self, hand_idx: int, raw_angle: float) -> float:
+        """
+        Circular Kalman filter applied PER HAND on the C3 output angle (degrees).
+        Handles 359°/1° wraparound correctly using circular difference.
+
+        State: [angle, angular_velocity]
+        Measurement: raw_angle
+        Process noise Q = 5.0, Measurement noise R = 10.0
+        """
+        Q = 5.0    # process noise (expected max hand movement between frames)
+        R = 10.0   # measurement noise (C3 typical error in degrees)
+
+        state = self._c3_kalman[hand_idx]
+
+        if state is None:
+            # First observation — initialise
+            self._c3_kalman[hand_idx] = {
+                "angle": raw_angle,
+                "vel":   0.0,
+                "P":     [[10.0, 0.0], [0.0, 5.0]]  # covariance
+            }
+            return raw_angle
+
+        # Predict
+        angle_pred = (state["angle"] + state["vel"]) % 360.0
+        P = state["P"]
+        P_pred = [
+            [P[0][0] + Q, P[0][1]],
+            [P[1][0],     P[1][1] + Q]
+        ]
+
+        # Circular innovation (wrap to ±180)
+        innov = raw_angle - angle_pred
+        innov = (innov + 180.0) % 360.0 - 180.0
+
+        # Kalman gain (scalar observation of angle only)
+        K0 = P_pred[0][0] / (P_pred[0][0] + R)
+        K1 = P_pred[1][0] / (P_pred[0][0] + R)
+
+        # Update
+        angle_upd = (angle_pred + K0 * innov) % 360.0
+        vel_upd   = state["vel"] + K1 * innov
+
+        self._c3_kalman[hand_idx] = {
+            "angle": angle_upd,
+            "vel":   float(np.clip(vel_upd, -15.0, 15.0)),  # cap velocity
+            "P":     [
+                [P_pred[0][0] * (1 - K0), P_pred[0][1]],
+                [P_pred[1][0] * (1 - K1), P_pred[1][1]]
+            ]
+        }
+        return angle_upd
 
     def _enable_dropout(self):
         """Set all Dropout layers to train mode so they remain stochastic during inference."""
@@ -759,6 +831,7 @@ class HARPEngine:
                 c3_crops = []
                 xai_explanations = []   # structured XAI results per hand
                 per_hand_xai = []       # per-hand uncertainty + alpha data
+                afs_scores = []         # ROAR Attribution Fidelity Scores
 
                 for i, (tip, rough_angle) in enumerate(zip([tip1, tip2], [a1, a2])):
                     crop = self._get_crop(target_crop, center, rough_angle)
@@ -774,11 +847,43 @@ class HARPEngine:
 
                     # L1 — GradCAM++ multi-layer fusion → (vis_overlay, raw_cam)
                     hand_heatmap_vis, raw_cam = self.xai.generate(t_input, norm_crop)
+
+                    # L1 annotation — draw quadrant box over peak activation
+                    if raw_cam is not None and self.local_explainer:
+                        hand_heatmap_vis = self.local_explainer.annotate_quadrant(
+                            hand_heatmap_vis, raw_cam
+                        )
                     heatmaps.append(hand_heatmap_vis)
 
+                    # L1.5 — Integrated Gradients (theoretically rigorous regression XAI)
+                    if self.ig_explainer and force_expert:
+                        ig_vis, ig_raw = self.ig_explainer.explain(
+                            self.c3_model, t_input, norm_crop
+                        )
+                        if ig_vis is not None:
+                            visualizations[f'xai_ig_h{i+1}'] = ig_vis
+
                     # MC Dropout — 20 stochastic passes → mean + uncertainty
-                    c3_angle, uncertainty_std = self._predict_with_uncertainty(t_input)
+                    c3_angle, uncertainty_std_raw = self._predict_with_uncertainty(t_input)
+                    # Temperature-scaled uncertainty (calibrated proxy)
+                    uncertainty_std = self._apply_temperature_scaling(uncertainty_std_raw)
                     delta = c3_angle - 360 if c3_angle > 180 else c3_angle
+
+                    # ROAR — Attribution Fidelity Score (causal heatmap check)
+                    afs_result = {"afs": 0.0, "delta_deg": 0.0}
+                    if self.roar_scorer and raw_cam is not None and force_expert:
+                        try:
+                            afs_result = self.roar_scorer.score(
+                                self.c3_model, t_input, raw_cam, c3_angle
+                            )
+                            debug_info.append(
+                                f"ROAR AFS H{i+1}: {afs_result['afs']:.3f} "
+                                f"(maskedΔ={afs_result['delta_deg']:.1f}°, "
+                                f"top-{afs_result['mask_pct']}% blanked)"
+                            )
+                        except Exception as _e:
+                            debug_info.append(f"ROAR H{i+1} error: {_e}")
+                    afs_scores.append(afs_result)
 
                     # L4 — AdaptiveSemanticRouter (L2 or L3 based on entropy)
                     if self.adaptive_router:
@@ -837,6 +942,8 @@ class HARPEngine:
                         "rough_angle": round(rough_angle, 2),
                         "delta": round(delta, 2),
                         "uncertainty_std": round(uncertainty_std, 2),
+                        "uncertainty_raw": round(uncertainty_std_raw, 2),
+                        "temperature": round(self._uncertainty_temperature, 3),
                         "alpha": round(alpha, 3),
                         "entropy": round(entropy_val, 3),
                     })
@@ -849,10 +956,18 @@ class HARPEngine:
                         refined_angles.append(rough_angle)
                     else:
                         blended = (alpha * (rough_angle + delta) + (1.0 - alpha) * rough_angle) % 360
+                        # C3 Kalman smoother — applied on the C3-corrected output
+                        smoothed = self._smooth_c3_angle(i, blended)
+                        kalman_delta = abs(blended - smoothed)
+                        if kalman_delta > 1.0:
+                            debug_info.append(
+                                f"Hand {i+1}: Kalman smoother: {blended:.1f}° → {smoothed:.1f}° "
+                                f"(Δ={kalman_delta:.1f}°)"
+                            )
                         debug_info.append(
-                            f"Hand {i+1}: α={alpha:.2f} → blended {rough_angle:.1f}° + {delta:+.1f}° = {blended:.1f}°"
+                            f"Hand {i+1}: α={alpha:.2f} → blended {rough_angle:.1f}° + {delta:+.1f}° = {smoothed:.1f}°"
                         )
-                        refined_angles.append(blended)
+                        refined_angles.append(smoothed)
 
                 if len(heatmaps) == 2:
                     heatmap_img = np.hstack((heatmaps[0], heatmaps[1]))
@@ -934,10 +1049,11 @@ class HARPEngine:
                     "c1_gauge_quality": g_quality,
                     "c2_research": c2_research_data,
                     "uncertainty_deg": uncertainty_summary,
-                    "xai_method": "GradCAM++ (L2+L3+L4 multi-layer) + MC-Dropout",
+                    "xai_method": "GradCAM++ (L2+L3+L4 multi-layer) + IG + MC-Dropout",
                     "contrastive_xai": contrastive_text,
                     "xai_explanations": xai_explanations,   # L2/L3 per-hand text
                     "per_hand_xai": per_hand_xai,           # uncertainty + alpha per hand
+                    "afs_scores": afs_scores,               # ROAR fidelity per hand
                 }
 
 # Alias mapping so you don't break existing `main.py` imports
