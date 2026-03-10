@@ -1,15 +1,15 @@
-import streamlit as st
-import requests
+import streamlit as st  # type: ignore
+import requests  # type: ignore
 import base64
-from PIL import Image
+from PIL import Image  # type: ignore
 import io
-import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
-from streamlit_webrtc import webrtc_streamer, RTCConfiguration, VideoProcessorBase
-import av
-import cv2
-import numpy as np
+import pandas as pd  # type: ignore
+import plotly.express as px  # type: ignore
+import plotly.graph_objects as go  # type: ignore
+from streamlit_webrtc import webrtc_streamer, RTCConfiguration, VideoProcessorBase  # type: ignore
+import av  # type: ignore
+import cv2  # type: ignore
+import numpy as np  # type: ignore
 import time
 import sys
 import os
@@ -72,7 +72,7 @@ class ClockProcessor(VideoProcessorBase):
         self.manual_max_val = ""
         self.last_result = None
         
-        from app.core.engine import HARPEngine
+        from app.core.engine import HARPEngine  # type: ignore
         self.engine = HARPEngine(parent_dir)
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
@@ -100,8 +100,8 @@ class ClockProcessor(VideoProcessorBase):
                 print(f"AI Error: {e}")
 
         # Draw overlays
-        if self.last_result:
-            res = self.last_result
+        if self.last_result and isinstance(self.last_result, dict):
+            res: dict = self.last_result  # type: ignore[assignment]
             
             # Show Time or Gauge %
             display_val = res.get('time', '--')
@@ -112,9 +112,10 @@ class ClockProcessor(VideoProcessorBase):
             cv2.putText(img, f"Mode: {method}", (50, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
             
             # Only show angles if it's a clock
-            if "angles" in res and res["angles"].get("hand1", 0) != 0.0:
-                a1 = res["angles"].get("hand1", 0)
-                a2 = res["angles"].get("hand2", 0)
+            angles = res.get("angles") or {}
+            if angles.get("hand1", 0) != 0.0:
+                a1 = angles.get("hand1", 0)
+                a2 = angles.get("hand2", 0)
                 cv2.putText(img, f"H:{a1:.0f} M:{a2:.0f}", (50, 190), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
 
         cv2.putText(img, f"FPS: {self.fps}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
@@ -127,40 +128,65 @@ class ClockProcessor(VideoProcessorBase):
 def show_reasoning_report(data):
     res = data["result"]
     
-    st.markdown(f"### {icon('description')} Official Diagnostic Report")
-    st.markdown(f"**Generated on:** {time.strftime('%Y-%m-%d %H:%M:%S')}")
-    st.markdown("---")
+    st.markdown("### 📋 Official Diagnostic Report")
+    st.caption(f"Generated on: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    st.divider()
     
     col1, col2 = st.columns([2, 1])
     with col1:
-        st.markdown(f"#### {icon('summarize')} Executive Summary")
+        st.markdown("#### 📝 Executive Summary")
         st.write(f"**Final Reading:** :green[{res.get('time', 'N/A')}]")
         st.write(f"**Detection Method:** {res.get('method', 'N/A')}")
-        st.write(f"**Confidence:** {res.get('confidence', 'N/A')}")
+        
+        c4_conf = res.get("c4_confidence")
+        if c4_conf:
+            tier_colors = {"CERTAIN": "green", "CONFIDENT": "blue", "UNCERTAIN": "orange", "UNRELIABLE": "red"}
+            tier = c4_conf['tier']
+            color = tier_colors.get(tier, "grey")
+            st.markdown(f"**Confidence:** :{color}[{tier}] `{c4_conf['score']}/100`")
+        else:
+            st.write(f"**Confidence:** {res.get('confidence', 'N/A')}")
+            
         st.write(f"**AM/PM Inference:** {res.get('ampm', 'N/A')}")
     
     with col2:
-        st.markdown(f"#### {icon('checklist')} Pipeline Status")
+        st.markdown("#### ✅ Pipeline Status")
         stages = ["C1 Detection", "C2 Keypoints", "C3 Expert AI", "C4 Physics"]
         for s in stages:
             is_done = True if "Expert" in res["method"] else (s != "C3 Expert AI")
-            st.markdown(f"{icon('check_circle' if is_done else 'cancel', color='green' if is_done else 'red')} {s}")
+            icon_lbl = "✅" if is_done else "❌"
+            st.write(f"{icon_lbl} {s}")
 
-    st.markdown("---")
-    st.markdown(f"#### {icon('psychology')} AI Logical Trace")
+    st.divider()
+    st.markdown("#### 🧠 AI Logical Trace")
     if "debug" in res:
         for trace in res["debug"]:
             if "C4 Telemetry Trace" in trace:
                 st.info(trace)
             elif "Heuristics" in trace:
                 st.success(trace)
+            elif "C4 Confidence" in trace:
+                st.warning(trace)
             else:
-                st.markdown(f"{icon('chevron_right', size=18)} {trace}")
+                st.write(f"▸ {trace}")
     else:
         st.warning("No trace logs available for this session.")
 
-    st.markdown("---")
-    st.markdown(f"#### {icon('analytics')} Physics Validation")
+    st.divider()
+    st.markdown("#### 📊 Physics Validation & Research Extension")
+    
+    c4_conf = res.get("c4_confidence")
+    if c4_conf:
+        tier = c4_conf['tier']
+        tier_map = {"CERTAIN": "🟢", "CONFIDENT": "🔵", "UNCERTAIN": "🟠", "UNRELIABLE": "🔴"}
+        st.info(f"{tier_map.get(tier, '⚪')} **C4+ Research Insight:** {c4_conf['reason']}")
+        cA, cB, cC = st.columns(3)
+        cA.metric("Confidence Score", f"{c4_conf['score']}%")
+        cB.metric("Angular Gap", f"{c4_conf['angular_gap']}°")
+        cC.metric("Tier", tier)
+    else:
+        st.warning("C4+ Confidence extension not available for this session.")
+
     col_a, col_b = st.columns(2)
     with col_a:
         st.write(f"**Angular Shift (H):** {res.get('angles', {}).get('hand1', 0):.1f}°")
@@ -169,8 +195,10 @@ def show_reasoning_report(data):
         st.write(f"**Ambiguity:** {res.get('ambiguity', 'None detected')}")
         st.write(f"**Accuracy:** {res.get('drift', 'N/A')}")
 
+    st.divider()
     if st.button("Close Report", type="primary"):
         st.rerun()
+
 
 def display_results(data):
     res = data["result"]
@@ -288,12 +316,12 @@ def display_results(data):
                         "Confidence %": round(c['confidence'], 1),
                         "Fit": get_fit(c['error']),
                     } for c in candidates])
-                    st.dataframe(cdf, use_container_width=True, hide_index=True)
+                    st.dataframe(cdf, width="stretch", hide_index=True)
             else:
                 st.info("No ambiguity detected.")
 
         st.markdown("---")
-        if st.button("📄 Generate Cognitive Reasoning Report", use_container_width=True):
+        if st.button("📄 Generate Cognitive Reasoning Report", width="stretch"):
             show_reasoning_report(data)
 
 # ==========================================
@@ -314,7 +342,7 @@ def nav_button(page_key, label, icon_name):
     with c2:
         # If selected, use 'primary' style (red), else 'secondary'
         btn_type = "primary" if st.session_state.page == page_key else "secondary"
-        if st.button(label, key=f"nav_{page_key}", type=btn_type, use_container_width=True):
+        if st.button(label, key=f"nav_{page_key}", type=btn_type, width="stretch"):
             st.session_state.page = page_key
             st.rerun()
 
@@ -424,7 +452,7 @@ elif st.session_state.page == "webcam":
                 stframe = st.empty()
                 
                 if "ip_cam_engine" not in st.session_state:
-                    from app.core.engine import HARPEngine
+                    from app.core.engine import HARPEngine  # type: ignore
                     st.session_state.ip_cam_engine = HARPEngine(parent_dir)
                 if "ip_cam_expert" not in st.session_state:
                     st.session_state.ip_cam_expert = False
@@ -438,8 +466,8 @@ elif st.session_state.page == "webcam":
         
         # Expert Mode Toggle
         st.markdown(f"{icon('military_tech')} **Force Expert Mode**", unsafe_allow_html=True)
-        if cam_source == "Local Webcam" and expert_controls_ctx and expert_controls_ctx.video_processor:
-            expert_controls_ctx.video_processor.force_expert = st.checkbox("Enable C3/XAI", value=False, key="webcam_expert")
+        if cam_source == "Local Webcam" and expert_controls_ctx and expert_controls_ctx.video_processor:  # type: ignore[union-attr]
+            expert_controls_ctx.video_processor.force_expert = st.checkbox("Enable C3/XAI", value=False, key="webcam_expert")  # type: ignore[union-attr]
         elif cam_source == "IP Camera (RTSP)":
             expert_enabled = st.checkbox("Enable C3/XAI", value=st.session_state.get("ip_cam_expert", False), key="ip_expert")
             st.session_state.ip_cam_expert = expert_enabled
@@ -450,11 +478,11 @@ elif st.session_state.page == "webcam":
         st.markdown(f"#### {icon('edit')} Manual Gauge Scale", unsafe_allow_html=True)
         colA, colB = st.columns(2)
         
-        if cam_source == "Local Webcam" and expert_controls_ctx and expert_controls_ctx.video_processor:
+        if cam_source == "Local Webcam" and expert_controls_ctx and expert_controls_ctx.video_processor:  # type: ignore[union-attr]
             manual_min = colA.text_input("Min Value", "", key="webcam_min")
             manual_max = colB.text_input("Max Value", "", key="webcam_max")
-            expert_controls_ctx.video_processor.manual_min_val = manual_min if manual_min.strip() else ""
-            expert_controls_ctx.video_processor.manual_max_val = manual_max if manual_max.strip() else ""
+            expert_controls_ctx.video_processor.manual_min_val = manual_min if manual_min.strip() else ""  # type: ignore[union-attr]
+            expert_controls_ctx.video_processor.manual_max_val = manual_max if manual_max.strip() else ""  # type: ignore[union-attr]
         elif cam_source == "IP Camera (RTSP)":
             manual_min = colA.text_input("Min Value", st.session_state.get("ip_cam_manual_min", ""), key="ip_min")
             manual_max = colB.text_input("Max Value", st.session_state.get("ip_cam_manual_max", ""), key="ip_max")
@@ -538,8 +566,8 @@ elif st.session_state.page == "webcam":
                         
                 # 2. Draw Overlays (We draw instantly on the copied frame before rendering)
                 display_frame = frame.copy()
-                if last_result:
-                    res = last_result
+                if last_result and isinstance(last_result, dict):
+                    res: dict = last_result  # type: ignore[assignment]
                     display_val = res.get('time', '--')
                     cv2.putText(display_frame, f"READING: {display_val}", (50, 100), cv2.FONT_HERSHEY_DUPLEX, 1.2, (0, 255, 0), 3)
                     
@@ -547,9 +575,10 @@ elif st.session_state.page == "webcam":
                     color = (0, 255, 0) if "Fast" in method or "Gauge" in method else (0, 0, 255)
                     cv2.putText(display_frame, f"Mode: {method}", (50, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
                     
-                    if "angles" in res and res["angles"].get("hand1", 0) != 0.0:
-                        a1 = res["angles"].get("hand1", 0)
-                        a2 = res["angles"].get("hand2", 0)
+                    angles = res.get("angles") or {}
+                    if angles.get("hand1", 0) != 0.0:
+                        a1 = angles.get("hand1", 0)
+                        a2 = angles.get("hand2", 0)
                         cv2.putText(display_frame, f"H:{a1:.0f} M:{a2:.0f}", (50, 190), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
 
                 cv2.putText(display_frame, f"Pipeline FPS: {fps}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
@@ -558,7 +587,7 @@ elif st.session_state.page == "webcam":
                 if now - last_ui_update_time >= UI_UPDATE_INTERVAL:
                     # Convert BGR to RGB for Streamlit
                     frame_rgb = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
-                    stframe.image(frame_rgb, channels="RGB", use_container_width=True)
+                    stframe.image(frame_rgb, channels="RGB", width="stretch")
                     last_ui_update_time = now
                     
                 # Sleep briefly to free CPU for the background reading thread if needed
@@ -582,7 +611,7 @@ elif st.session_state.page == "batch":
                 if res.status_code == 200:
                     data = res.json()
                     st.markdown(f"#### {icon('check_circle')} Processed {data['total_images']} images", unsafe_allow_html=True)
-                    st.dataframe(pd.DataFrame(data["results"]), use_container_width=True)
+                    st.dataframe(pd.DataFrame(data["results"]), width="stretch")
                 else: st.error("Batch failed.")
             except Exception as e: st.error(f"Error: {e}")
 
@@ -639,11 +668,11 @@ elif st.session_state.page == "dashboard":
         with c1:
             st.markdown(f"#### {icon('alt_route')} Logic Path Distribution", unsafe_allow_html=True)
             df_method = pd.DataFrame(list(metrics["method_usage"].items()), columns=["Method", "Count"])
-            if not df_method.empty: st.plotly_chart(px.bar(df_method, x="Method", y="Count", color="Method"), use_container_width=True)
+            if not df_method.empty: st.plotly_chart(px.bar(df_method, x="Method", y="Count", color="Method"), use_container_width=True)  # plotly still uses this
             else: st.info("No data yet.")
         with c2:
             st.markdown(f"#### {icon('memory')} Component Utilization", unsafe_allow_html=True)
             df_comp = pd.DataFrame(list(metrics["component_usage"].items()), columns=["Component", "Count"])
-            if not df_comp.empty: st.plotly_chart(px.pie(df_comp, names="Component", values="Count", hole=0.4), use_container_width=True)
+            if not df_comp.empty: st.plotly_chart(px.pie(df_comp, names="Component", values="Count", hole=0.4), use_container_width=True)  # plotly still uses this
             else: st.info("No data yet.")
     except Exception as e: st.error(f"Dashboard Error: {e}")

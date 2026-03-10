@@ -13,6 +13,7 @@ import google.generativeai as genai
 import easyocr
 from dotenv import load_dotenv
 from datetime import datetime
+from app.core.c4_confidence import C4ConfidenceAnalyzer
 
 load_dotenv()
 class HARPEngine:
@@ -62,6 +63,9 @@ class HARPEngine:
         
         print("Loading EasyOCR Fallback...")
         self.reader = easyocr.Reader(['en'], gpu=torch.cuda.is_available())
+
+        # --- [C4+] CONFIDENCE ANALYZER (Research Extension) ---
+        self.c4_confidence = C4ConfidenceAnalyzer()
 
     def _load_yolo(self, path, name):
         try:
@@ -545,6 +549,10 @@ class HARPEngine:
             ambiguity_warning = self._resolve_ambiguity(a1, a2, h, m)
             drift_str = self._calculate_drift(h, m, device_time_str)
             
+            # [C4+] Physics Confidence Assessment (Research Extension)
+            c4_conf_result = self.c4_confidence.analyze(a1, a2, error, h, m)
+            debug_info.append(f"C4 Confidence: {c4_conf_result.reason}")
+            
             debug_info.append(f"AM/PM: {ampm_status} (Conf: {ampm_conf:.2f})")
             debug_info.append(f"C4 Telemetry Trace: {telemetry_log}")
             
@@ -575,7 +583,8 @@ class HARPEngine:
                     "ampm": ampm_status,
                     "drift": drift_str,
                     "ambiguity": ambiguity_warning,
-                    "ambiguity_candidates": cands
+                    "ambiguity_candidates": cands,
+                    "c4_confidence": c4_conf_result.to_dict()
                 }
             
             # --- [C3] CLOCK EXPERT PATH ---
@@ -642,6 +651,10 @@ class HARPEngine:
                 if ambiguity_warning_expert and not ambiguity_warning:
                     debug_info.append(ambiguity_warning_expert)
                 drift_str_expert = self._calculate_drift(h_new, m_new, device_time_str)
+
+                # [C4+] Physics Confidence Assessment (Expert Path)
+                c4_conf_result_new = self.c4_confidence.analyze(refined_angles[0], refined_angles[1], err_new, h_new, m_new)
+                debug_info.append(f"C4 Confidence (Expert): {c4_conf_result_new.reason}")
                 
                 return {
                     "time": f"{h_new}:{m_new:02d}",
@@ -656,7 +669,8 @@ class HARPEngine:
                     "ampm": ampm_status,
                     "drift": drift_str_expert,
                     "ambiguity": ambiguity_warning_expert or ambiguity_warning,
-                    "ambiguity_candidates": cands_new
+                    "ambiguity_candidates": cands_new,
+                    "c4_confidence": c4_conf_result_new.to_dict()
                 }
 
 # Alias mapping so you don't break existing `main.py` imports 
