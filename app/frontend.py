@@ -545,84 +545,9 @@ def display_results(data):
             else:
                 st.info("Impact summary not available.")
     with tab3:
-        st.markdown(f"{icon('psychology')} **Angle Predictions**", unsafe_allow_html=True)
-        col_a, col_b = st.columns(2)
-        with col_a:
-            if "c3_angles" in viz: st.image(base64.b64decode(viz["c3_angles"]), caption="Angle Visual", width=300)
-        with col_b:
-            if "angles" in res and res["angles"]:
-                if "span" in res["angles"]:
-                    st.markdown(f"**Total Scale Span:** {res['angles'].get('span', 0):.1f}°")
-                    st.markdown(f"**Needle Pos:** {res['angles'].get('needle', 0):.1f}°")
-                    upd = res['angles'].get('units_per_deg', 0.0)
-                    if upd > 0:
-                        st.markdown(f"**1° Angle =** {upd:.4f} scale units")
-                else:
-                    h_ang = res['angles'].get('hand1', 0)
-                    m_ang = res['angles'].get('hand2', 0)
-                    st.markdown(f"**H:** {h_ang:.1f}°")
-                    st.markdown(f"**M:** {m_ang:.1f}°")
-
-        # ── MC Dropout Uncertainty Panel ──────────────────────────────────────
-        unc_str = res.get("uncertainty_deg", "")
-        if unc_str and unc_str != "N/A":
-            st.markdown("---")
-            st.markdown(f"#### {icon('analytics')} MC Dropout Uncertainty (20 stochastic passes)", unsafe_allow_html=True)
-
-            # Parse "H1=±5.2°, H2=±8.7°" into individual values
-            unc_parts = [p.strip() for p in unc_str.split(",") if p.strip()]
-            unc_cols = st.columns(len(unc_parts)) if unc_parts else []
-            for col, part in zip(unc_cols, unc_parts):
-                try:
-                    label, val_str = part.split("=")
-                    sigma = float(val_str.replace("±", "").replace("°", "").strip())
-                    alpha = max(0.0, min(1.0, 1.0 - sigma / 20.0))
-
-                    # Color-code: green < 5°, yellow 5-15°, red > 15°
-                    if sigma < 5.0:
-                        color, grade = "#22c55e", "High Confidence"
-                    elif sigma < 15.0:
-                        color, grade = "#f59e0b", "Moderate Confidence"
-                    else:
-                        color, grade = "#ef4444", "Low Confidence (C2 preferred)"
-
-                    col.markdown(f"""
-                    <div style="background:#0f0f1a;border:1px solid {color}44;border-radius:10px;padding:14px;text-align:center;">
-                        <div style="color:#94a3b8;font-size:11px;margin-bottom:4px;">{label.strip()} σ (uncertainty)</div>
-                        <div style="color:{color};font-size:28px;font-weight:800;">±{sigma:.1f}°</div>
-                        <div style="color:#64748b;font-size:11px;margin-top:4px;">{grade}</div>
-                        <div style="margin-top:8px;background:#1e293b;border-radius:4px;height:6px;">
-                            <div style="width:{int(alpha*100)}%;height:6px;background:{color};border-radius:4px;"></div>
-                        </div>
-                        <div style="color:#64748b;font-size:10px;margin-top:3px;">α = {alpha:.2f}  (C3 blend weight)</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                except Exception:
-                    col.markdown(f"`{part}`")
-
-            with st.expander("ℹ️ How MC Dropout works"):
-                st.markdown("""
-                **Monte Carlo Dropout** keeps the `Dropout(0.3)` layer stochastic during inference.
-                After **20 forward passes**, predictions spread over a distribution:
-                - **σ (sigma)** = circular standard deviation of the 20 angle predictions
-                - **α (alpha)** = `clip(1 − σ/20, 0, 1)` — weight given to C3's correction
-                - When **σ < 5°**, the model is certain and C3 dominates
-                - When **σ > 15°**, uncertainty is high and C2 geometry is preferred
-                - Final angle = `α × (C2 + C3 delta) + (1−α) × C2`
-                """)
-        # ──────────────────────────────────────────────────────────────────────
-
-        if "c3_crops" in viz and viz["c3_crops"]:
-            st.markdown("---")
-
-            # ── ResNet-18 Input Crops ────────────────────────────────────────
-            st.markdown(f"**{icon('image')} ResNet-18 Input Crops (MC Dropout active)**", unsafe_allow_html=True)
-            c_cols = st.columns(max(len(viz["c3_crops"]), 1))
-            for idx, (col, crop) in enumerate(zip(c_cols, viz["c3_crops"])):
-                col.image(base64.b64decode(crop), caption=f"Hand {idx+1} crop (64×64)", width=120)
-
-            # ── XAI Method badge ─────────────────────────────────────────────
-            xai_method = res.get("xai_method", "GradCAM")
+        # ── Top: XAI method badge ──────────────────────────────────────────────
+        xai_method = res.get("xai_method", "")
+        if xai_method:
             st.markdown(
                 f"<span style='background:#a78bfa22;color:#a78bfa;padding:3px 10px;"
                 f"border-radius:4px;font-size:11px;font-weight:700;border:1px solid #a78bfa44;'>"
@@ -630,81 +555,171 @@ def display_results(data):
                 unsafe_allow_html=True
             )
 
-            # ── 4-tab XAI Heatmap Display ────────────────────────────────────
-            xai_t1, xai_t2, xai_t3, xai_t4 = st.tabs(
-                ["🔥 GradCAM++", "🧮 Integrated Gradients", "🟩 LIME", "🔴 SHAP"]
-            )
+        c3_has_data = "c3_crops" in viz and viz["c3_crops"]
 
-            with xai_t1:
-                if data.get("heatmap_b64"):
-                    st.image(base64.b64decode(data["heatmap_b64"]),
-                             caption="GradCAM++ — fused L2×0.20 + L3×0.30 + L4×0.50 + quadrant box",
-                             width=380)
-                    # ROAR AFS badge per hand
-                    afs_list = res.get("afs_scores", [])
-                    if afs_list:
-                        afs_cols = st.columns(len(afs_list))
-                        for ac, afs in zip(afs_cols, afs_list):
-                            afs_val = afs.get("afs", 0.0)
-                            afs_pct = int(afs_val * 100)
-                            afs_color = "#22c55e" if afs_val > 0.5 else "#f59e0b" if afs_val > 0.25 else "#ef4444"
-                            ac.markdown(
-                                f"<div style='text-align:center;'>"
-                                f"<div style='color:#64748b;font-size:10px;'>H{afs.get('mask_pct',20)}% masked → Δ{afs.get('delta_deg',0):.1f}°</div>"
-                                f"<div style='color:{afs_color};font-size:18px;font-weight:700;'>AFS {afs_pct}%</div>"
-                                f"<div style='color:#475569;font-size:9px;'>{'Causal ✅' if afs_val>0.5 else 'Weak causal ⚠️' if afs_val>0.25 else 'Not causal ❌'}</div>"
-                                f"</div>",
-                                unsafe_allow_html=True
-                            )
-                else:
-                    st.info("GradCAM++ heatmap not available.")
+        c3s1, c3s2, c3s3, c3s4, c3s5 = st.tabs([
+            "📐 Angle Regression",
+            "🔬 XAI Heatmaps",
+            "🧠 AI Explanations",
+            "📊 Uncertainty",
+            "🔍 Pipeline Debug",
+        ])
 
-            with xai_t2:
-                ig_found = False
-                for hi in range(1, 3):
-                    key = f"xai_ig_h{hi}"
-                    if key in viz and viz[key]:
-                        st.image(base64.b64decode(viz[key]),
-                                 caption=f"Integrated Gradients — Hand {hi} (HOT colourmap, 50 steps)",
-                                 width=300)
-                        ig_found = True
-                if not ig_found:
-                    st.info("IG overlay not available. Enable **Force Expert Path** to compute.")
-                st.caption(
-                    "IG satisfies Completeness • Sensitivity • Implementation Invariance "
-                    "(Sundararajan et al., ICML 2017) — theoretically grounded for regression."
+        # ══════════════════════════════════════════════════════════════════════
+        # SUB-TAB 1 — Angle Regression
+        # ══════════════════════════════════════════════════════════════════════
+        with c3s1:
+            col_a, col_b = st.columns(2)
+            with col_a:
+                if "c3_angles" in viz:
+                    st.image(base64.b64decode(viz["c3_angles"]), caption="Angle Visual", width=300)
+            with col_b:
+                if "angles" in res and res["angles"]:
+                    if "span" in res["angles"]:
+                        st.metric("Scale Span", f"{res['angles'].get('span', 0):.1f}°")
+                        st.metric("Needle Pos",  f"{res['angles'].get('needle', 0):.1f}°")
+                        upd = res["angles"].get("units_per_deg", 0.0)
+                        if upd > 0:
+                            st.markdown(f"**1° =** `{upd:.4f}` scale units")
+                    else:
+                        h_ang = res["angles"].get("hand1", 0)
+                        m_ang = res["angles"].get("hand2", 0)
+                        st.metric("Hour Hand",   f"{h_ang:.1f}°")
+                        st.metric("Minute Hand", f"{m_ang:.1f}°")
+
+            if c3_has_data:
+                st.markdown("---")
+                st.markdown(
+                    f"**{icon('image')} ResNet-18 Input Crops (MC Dropout active)**",
+                    unsafe_allow_html=True
+                )
+                c_cols = st.columns(max(len(viz["c3_crops"]), 1))
+                for idx, (col, crop) in enumerate(zip(c_cols, viz["c3_crops"])):
+                    col.image(base64.b64decode(crop), caption=f"Hand {idx+1} crop (64×64)", width=120)
+
+            if not c3_has_data:
+                st.info("Expert AI skipped (Fast Path or Gauge Mode). Enable 'Force Expert Path' to activate.")
+
+        # ══════════════════════════════════════════════════════════════════════
+        # SUB-TAB 2 — XAI Heatmaps
+        # ══════════════════════════════════════════════════════════════════════
+        with c3s2:
+            if not c3_has_data:
+                st.info("No XAI heatmaps — run with Force Expert Path.")
+            else:
+                xai_t1, xai_t2, xai_t3, xai_t4 = st.tabs(
+                    ["🔥 GradCAM++", "🧮 Integrated Gradients", "🟩 LIME", "🔴 SHAP"]
                 )
 
-            with xai_t3:
-                lime_found = False
-                for hi in range(1, 3):
-                    key = f"xai_lime_h{hi}"
-                    if key in viz and viz[key]:
-                        st.image(base64.b64decode(viz[key]),
-                                 caption=f"LIME — Hand {hi} (top-5 superpixels, 200 perturbations)", width=300)
-                        lime_found = True
-                if not lime_found:
-                    st.info("LIME overlay not available. Run with `pip install lime` and Force Expert Path.")
+                with xai_t1:
+                    if data.get("heatmap_b64"):
+                        st.image(base64.b64decode(data["heatmap_b64"]),
+                                 caption="GradCAM++ — fused L2×0.20 + L3×0.30 + L4×0.50 + quadrant annotation",
+                                 width=400)
+                        # AFS badges
+                        afs_list = res.get("afs_scores", [])
+                        if afs_list:
+                            st.markdown("**Attribution Fidelity Score (ROAR — top-20% pixels blanked)**")
+                            afs_cols = st.columns(len(afs_list))
+                            for ac, afs in zip(afs_cols, afs_list):
+                                afs_val   = afs.get("afs", 0.0)
+                                afs_pct   = int(afs_val * 100)
+                                afs_color = "#22c55e" if afs_val > 0.5 else "#f59e0b" if afs_val > 0.25 else "#ef4444"
+                                causal_lbl = "Causal ✅" if afs_val > 0.5 else "Weak ⚠️" if afs_val > 0.25 else "Not causal ❌"
+                                ac.markdown(
+                                    f"<div style='text-align:center;padding:8px;background:#0f0f1a;"
+                                    f"border:1px solid {afs_color}44;border-radius:8px;'>"
+                                    f"<div style='color:#64748b;font-size:10px;'>maskedΔ={afs.get('delta_deg',0):.1f}°</div>"
+                                    f"<div style='color:{afs_color};font-size:22px;font-weight:800;'>AFS {afs_pct}%</div>"
+                                    f"<div style='color:#475569;font-size:10px;'>{causal_lbl}</div>"
+                                    f"</div>",
+                                    unsafe_allow_html=True
+                                )
+                    else:
+                        st.info("GradCAM++ heatmap not available.")
 
-            with xai_t4:
-                shap_found = False
-                for hi in range(1, 3):
-                    key = f"xai_shap_h{hi}"
-                    if key in viz and viz[key]:
-                        st.image(base64.b64decode(viz[key]),
-                                 caption=f"SHAP — Hand {hi} attribution (red=high positive influence)", width=300)
-                        shap_found = True
-                if not shap_found:
-                    st.info("SHAP map not available. Run with `pip install shap` and Force Expert Path.")
+                with xai_t2:
+                    ig_found = False
+                    for hi in range(1, 3):
+                        key = f"xai_ig_h{hi}"
+                        if key in viz and viz[key]:
+                            st.image(base64.b64decode(viz[key]),
+                                     caption=f"Integrated Gradients — Hand {hi} (HOT colourmap, 50 steps)",
+                                     width=300)
+                            ig_found = True
+                    if not ig_found:
+                        st.info("IG overlay requires **Force Expert Path**.")
+                    st.caption(
+                        "IG satisfies Completeness • Sensitivity • Implementation Invariance "
+                        "(Sundararajan et al., ICML 2017) — theoretically grounded for regression."
+                    )
 
-            # ── Contrastive XAI ──────────────────────────────────────────────
+                with xai_t3:
+                    lime_found = False
+                    for hi in range(1, 3):
+                        key = f"xai_lime_h{hi}"
+                        if key in viz and viz[key]:
+                            st.image(base64.b64decode(viz[key]),
+                                     caption=f"LIME — Hand {hi} (top-5 superpixels, 200 perturbations)", width=300)
+                            lime_found = True
+                    if not lime_found:
+                        st.info("LIME requires `pip install lime` + Force Expert Path.")
+
+                with xai_t4:
+                    shap_found = False
+                    for hi in range(1, 3):
+                        key = f"xai_shap_h{hi}"
+                        if key in viz and viz[key]:
+                            st.image(base64.b64decode(viz[key]),
+                                     caption=f"SHAP — Hand {hi} attribution (red=high positive influence)", width=300)
+                            shap_found = True
+                    if not shap_found:
+                        st.info("SHAP requires `pip install shap` + Force Expert Path.")
+
+        # ══════════════════════════════════════════════════════════════════════
+        # SUB-TAB 3 — AI Explanations
+        # ══════════════════════════════════════════════════════════════════════
+        with c3s3:
+            # — Local / Gemini cards —
+            xai_exps = res.get("xai_explanations", [])
+            if xai_exps:
+                st.markdown(f"#### {icon('psychology')} AI Explanation per Hand", unsafe_allow_html=True)
+                for exp in xai_exps:
+                    h_num   = exp.get("hand", "?")
+                    source  = exp.get("source", "Local")
+                    text    = exp.get("explanation", "")
+                    entropy = exp.get("entropy", 0.0)
+                    routing = exp.get("routing_reason", "")
+
+                    if source == "Gemini":
+                        bc, bi, bl = "#a78bfa", "✨", "Gemini Vision"
+                    else:
+                        bc, bi, bl = "#38bdf8", "🔵", "Local Heuristic"
+
+                    st.markdown(f"""
+                    <div style="background:#0f0f1a;border:1px solid {bc}33;
+                                border-radius:10px;padding:14px 16px;margin-bottom:10px;">
+                        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+                            <span style="background:{bc}22;color:{bc};padding:2px 10px;
+                                         border-radius:4px;font-size:11px;font-weight:700;
+                                         border:1px solid {bc}44;">{bi} {bl}</span>
+                            <span style="color:#94a3b8;font-size:12px;">Hand {h_num}</span>
+                            <span style="color:#64748b;font-size:11px;margin-left:auto;">entropy={entropy:.3f}</span>
+                        </div>
+                        <div style="color:#e2e8f0;font-size:13px;line-height:1.5;">{text}</div>
+                        <div style="color:#475569;font-size:10px;margin-top:6px;">Routing: {routing}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+            else:
+                st.info("No AI explanations yet — run analysis to populate.")
+
+            # — Contrastive XAI —
             contrastive = res.get("contrastive_xai", "")
             if contrastive:
                 st.markdown("---")
                 st.markdown(f"#### {icon('compare_arrows')} Contrastive XAI — Why this time?",
                             unsafe_allow_html=True)
                 lines = contrastive.split("\n")
-                # Header line
                 if lines:
                     st.markdown(f"**{lines[0]}**")
                 for line in lines[1:]:
@@ -719,59 +734,15 @@ def display_results(data):
                         unsafe_allow_html=True
                     )
 
-            # ══════════════════════════════════════════════════════════════════
-            # 🔵  AI MODEL EXPLANATIONS (LocalExplainer / Gemini per hand)
-            # ══════════════════════════════════════════════════════════════════
-            xai_exps = res.get("xai_explanations", [])
-            if xai_exps:
-                st.markdown("---")
-                st.markdown(
-                    f"#### {icon('psychology')} AI Model Explanations",
-                    unsafe_allow_html=True
-                )
-                for exp in xai_exps:
-                    h_num   = exp.get("hand", "?")
-                    source  = exp.get("source", "Local")
-                    text    = exp.get("explanation", "")
-                    entropy = exp.get("entropy", 0.0)
-                    routing = exp.get("routing_reason", "")
-
-                    if source == "Gemini":
-                        badge_color, badge_icon, badge_label = "#a78bfa", "✨", "Gemini Vision"
-                    else:
-                        badge_color, badge_icon, badge_label = "#38bdf8", "🔵", "Local Heuristic"
-
-                    st.markdown(f"""
-                    <div style="background:#0f0f1a;border:1px solid {badge_color}33;
-                                border-radius:10px;padding:14px 16px;margin-bottom:10px;">
-                        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
-                            <span style="background:{badge_color}22;color:{badge_color};
-                                         padding:2px 10px;border-radius:4px;font-size:11px;
-                                         font-weight:700;border:1px solid {badge_color}44;">
-                                {badge_icon} {badge_label}
-                            </span>
-                            <span style="color:#94a3b8;font-size:12px;">Hand {h_num}</span>
-                            <span style="color:#64748b;font-size:11px;margin-left:auto;">
-                                entropy={entropy:.3f}
-                            </span>
-                        </div>
-                        <div style="color:#e2e8f0;font-size:13px;line-height:1.5;">{text}</div>
-                        <div style="color:#475569;font-size:10px;margin-top:6px;">
-                            Routing: {routing}
-                        </div>
-                    </div>
-                    """, unsafe_allow_html=True)
-
-            # ══════════════════════════════════════════════════════════════════
-            # 📊  C3 UNCERTAINTY  (MC Dropout per hand)
-            # ══════════════════════════════════════════════════════════════════
+        # ══════════════════════════════════════════════════════════════════════
+        # SUB-TAB 4 — Uncertainty & Calibration
+        # ══════════════════════════════════════════════════════════════════════
+        with c3s4:
+            # Structured per-hand cards
             per_hand = res.get("per_hand_xai", [])
             if per_hand:
-                st.markdown("---")
-                st.markdown(
-                    f"#### {icon('analytics')} C3 Uncertainty — MC Dropout (20 passes)",
-                    unsafe_allow_html=True
-                )
+                st.markdown(f"#### {icon('analytics')} MC Dropout — Per-Hand Uncertainty (20 passes)",
+                            unsafe_allow_html=True)
                 cols = st.columns(len(per_hand))
                 for col, h in zip(cols, per_hand):
                     sig   = h.get("uncertainty_std", 0.0)
@@ -780,19 +751,17 @@ def display_results(data):
                     c3a   = h.get("c3_angle", 0.0)
                     raw_a = h.get("rough_angle", 0.0)
                     ent   = h.get("entropy", 0.0)
+                    u_raw = h.get("uncertainty_raw", sig)
+                    temp  = h.get("temperature", 1.0)
 
-                    if sig < 5.0:
-                        sc, sg = "#22c55e", "High Confidence"
-                    elif sig < 15.0:
-                        sc, sg = "#f59e0b", "Moderate"
-                    else:
-                        sc, sg = "#ef4444", "Low — C2 preferred"
+                    sc = "#22c55e" if sig < 5.0 else "#f59e0b" if sig < 15.0 else "#ef4444"
+                    sg = "High Confidence" if sig < 5.0 else "Moderate" if sig < 15.0 else "Low — C2 preferred"
 
                     col.markdown(f"""
                     <div style="background:#0f0f1a;border:1px solid {sc}44;
                                 border-radius:10px;padding:12px;text-align:center;">
                         <div style="color:#94a3b8;font-size:10px;">Hand {h.get('hand','?')}</div>
-                        <div style="color:{sc};font-size:26px;font-weight:800;margin:4px 0;">
+                        <div style="color:{sc};font-size:28px;font-weight:800;margin:4px 0;">
                             ±{sig:.1f}°
                         </div>
                         <div style="color:#64748b;font-size:10px;">{sg}</div>
@@ -805,44 +774,111 @@ def display_results(data):
                             C2={raw_a:.1f}° → C3={c3a:.1f}° (δ={delta:+.1f}°)
                         </div>
                         <div style="color:#334155;font-size:10px;">entropy={ent:.3f}</div>
+                        <div style="color:#1e3a5f;font-size:9px;margin-top:3px;">
+                            raw σ={u_raw:.1f}° × T={temp:.2f} → {sig:.1f}°
+                        </div>
                     </div>
                     """, unsafe_allow_html=True)
 
-            # ══════════════════════════════════════════════════════════════════
-            # 🔍  FULL PIPELINE DEBUG LOG
-            # ══════════════════════════════════════════════════════════════════
-            debug_lines = res.get("debug", [])
-            if debug_lines:
+            # Legacy summary string (always show if present)
+            unc_str = res.get("uncertainty_deg", "")
+            if unc_str and unc_str != "N/A":
                 st.markdown("---")
-                with st.expander(
-                    f"🔍 Full Pipeline Debug Log  ({len(debug_lines)} steps)", expanded=False
-                ):
-                    def _icon_for(line: str) -> str:
-                        l = line.lower()
-                        if any(k in l for k in ["error", "failed", "rejected", "❌"]):
-                            return "🔴"
-                        if any(k in l for k in ["warning", "⚠", "slow", "ambiguity"]):
-                            return "⚠️"
-                        if any(k in l for k in ["xai", "gemini", "local xai", "entropy"]):
-                            return "🔵"
-                        if any(k in l for k in ["accepted", "✅", "ok", "success", "passed"]):
-                            return "✅"
-                        if any(k in l for k in ["c1:", "c2", "c3", "c4", "physics"]):
-                            return "🟢"
-                        return "▪️"
-
-                    for step_i, line in enumerate(debug_lines, 1):
-                        badge = _icon_for(line)
-                        st.markdown(
-                            f"<div style='font-family:monospace;font-size:11px;"
-                            f"padding:2px 6px;border-radius:3px;margin:1px 0;"
-                            f"color:#94a3b8;background:#0a0a14;'>"
-                            f"<span style='color:#475569;'>[{step_i:02d}]</span> "
-                            f"{badge} {line}</div>",
+                st.caption(f"**Summary:** {unc_str}")
+                unc_parts = [p.strip() for p in unc_str.split(",") if p.strip()]
+                unc_cols  = st.columns(len(unc_parts)) if unc_parts else []
+                for col, part in zip(unc_cols, unc_parts):
+                    try:
+                        label, val_str = part.split("=")
+                        sigma = float(val_str.replace("±", "").replace("°", "").strip())
+                        alpha = max(0.0, min(1.0, 1.0 - sigma / 20.0))
+                        color = "#22c55e" if sigma < 5.0 else "#f59e0b" if sigma < 15.0 else "#ef4444"
+                        grade = "High" if sigma < 5.0 else "Moderate" if sigma < 15.0 else "Low"
+                        col.markdown(
+                            f"<div style='background:#0f0f1a;border:1px solid {color}44;"
+                            f"border-radius:8px;padding:10px;text-align:center;'>"
+                            f"<div style='color:#64748b;font-size:10px;'>{label.strip()}</div>"
+                            f"<div style='color:{color};font-size:22px;font-weight:800;'>±{sigma:.1f}°</div>"
+                            f"<div style='color:#475569;font-size:10px;'>{grade} · α={alpha:.2f}</div>"
+                            f"</div>",
                             unsafe_allow_html=True
                         )
-        else:
-            st.info("Expert AI skipped (Fast Path or Gauge Mode). Enable 'Force Expert Path' to activate XAI.")
+                    except Exception:
+                        col.code(part)
+
+            with st.expander("ℹ️ How MC Dropout + Kalman works"):
+                st.markdown("""
+                **MC Dropout** keeps `Dropout(0.3)` stochastic during inference.
+                **20 forward passes** → circular σ (uncertainty):
+                - σ < 5° → **High Confidence** — C3 dominates (α ≈ 1.0)
+                - σ 5–15° → **Moderate** — blended C2 + C3
+                - σ > 15° → **Low** — C2 geometry preferred (α → 0)
+
+                **Temperature scaling:** `σ_cal = σ_raw × T`  (T=1.0 = uncalibrated)
+
+                **C3 Kalman Smoother** (new): after blending, each hand's output is
+                passed through a per-hand circular Kalman filter `[angle, velocity]`
+                to eliminate frame-to-frame spikes during live video mode.
+                """)
+
+            if not per_hand and not unc_str:
+                st.info("No uncertainty data — run with Expert Path active.")
+
+        # ══════════════════════════════════════════════════════════════════════
+        # SUB-TAB 5 — Pipeline Debug
+        # ══════════════════════════════════════════════════════════════════════
+        with c3s5:
+            debug_lines = res.get("debug", [])
+            if debug_lines:
+                def _icon_for(line: str) -> str:
+                    l = line.lower()
+                    if any(k in l for k in ["error", "failed", "rejected", "❌"]):
+                        return "🔴"
+                    if any(k in l for k in ["warning", "⚠", "slow", "ambiguity"]):
+                        return "⚠️"
+                    if any(k in l for k in ["xai", "gemini", "local xai", "entropy", "roar", "ig"]):
+                        return "🔵"
+                    if any(k in l for k in ["kalman", "smooth"]):
+                        return "🟣"
+                    if any(k in l for k in ["accepted", "✅", "ok", "success", "passed"]):
+                        return "✅"
+                    if any(k in l for k in ["c1:", "c2", "c3", "c4", "physics"]):
+                        return "🟢"
+                    return "▪️"
+
+                # Group filter
+                filter_opts = ["All", "🔴 Errors", "🔵 XAI", "🟢 Pipeline", "⚠️ Warnings", "🟣 Kalman"]
+                f_col, _ = st.columns([1, 3])
+                chosen = f_col.selectbox("Filter", filter_opts, label_visibility="collapsed")
+
+                filtered = debug_lines
+                if chosen == "🔴 Errors":
+                    filtered = [l for l in debug_lines if any(k in l.lower() for k in ["error", "failed", "❌"])]
+                elif chosen == "🔵 XAI":
+                    filtered = [l for l in debug_lines if any(k in l.lower() for k in ["xai", "gemini", "entropy", "roar", "ig"])]
+                elif chosen == "🟢 Pipeline":
+                    filtered = [l for l in debug_lines if any(k in l.lower() for k in ["c1:", "c2", "c3", "c4", "physics"])]
+                elif chosen == "⚠️ Warnings":
+                    filtered = [l for l in debug_lines if any(k in l.lower() for k in ["warning", "⚠", "ambiguity"])]
+                elif chosen == "🟣 Kalman":
+                    filtered = [l for l in debug_lines if any(k in l.lower() for k in ["kalman", "smooth"])]
+
+                st.caption(f"Showing {len(filtered)} / {len(debug_lines)} steps")
+                for step_i, line in enumerate(filtered, 1):
+                    badge = _icon_for(line)
+                    st.markdown(
+                        f"<div style='font-family:monospace;font-size:11px;padding:2px 8px;"
+                        f"border-radius:3px;margin:1px 0;color:#94a3b8;background:#0a0a14;'>"
+                        f"<span style='color:#475569;'>[{step_i:02d}]</span> {badge} {line}</div>",
+                        unsafe_allow_html=True
+                    )
+            else:
+                st.info("No debug log — run with Expert Path to see pipeline steps.")
+
+        # (All C3 features are now in the 5 sub-tabs above)
+
+
+
 
     with tab4:
         st.markdown(f"# {icon('schedule')} {res['time']}", unsafe_allow_html=True)
