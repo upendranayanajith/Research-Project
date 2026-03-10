@@ -23,17 +23,19 @@ def render_c1_localization(viz, res):
             
             st.progress(overall / 100.0, text=f"Overall Tracking Quality: {overall}/100")
             
+            st.markdown("<br>", unsafe_allow_html=True) # Added spacing
+            
             col_sharp, col_bright, col_cont = st.columns(3)
             with col_sharp:
-                st.caption(f"Sharpness (Raw: {raw_blur:.1f})")
+                st.markdown(f"<span style='color:white; font-size:18px; font-weight:500;'>Sharpness</span> <span style='color:gray; font-size:12px;'>(Raw: {raw_blur:.1f})</span>", unsafe_allow_html=True)
                 st.progress(blur_perc, text=f"{int(blur_perc*100)}% {'Clear' if blur_perc > 0.5 else 'Blurry'}")
             
             with col_bright:
-                st.caption(f"Brightness (Raw: {raw_bright:.1f})")
+                st.markdown(f"<span style='color:white; font-size:18px; font-weight:500;'>Brightness</span> <span style='color:gray; font-size:12px;'>(Raw: {raw_bright:.1f})</span>", unsafe_allow_html=True)
                 st.progress(bright_perc, text=f"{int(bright_perc*100)}% {'Optimal' if bright_perc > 0.5 else 'Dark'}")
             
             with col_cont:
-                st.caption(f"Contrast (Raw: {raw_cont:.1f})")
+                st.markdown(f"<span style='color:white; font-size:18px; font-weight:500;'>Contrast</span> <span style='color:gray; font-size:12px;'>(Raw: {raw_cont:.1f})</span>", unsafe_allow_html=True)
                 st.progress(cont_perc, text=f"{int(cont_perc*100)}% {'High' if cont_perc > 0.5 else 'Low'}")
             
     with col2:
@@ -49,12 +51,12 @@ def render_c1_localization(viz, res):
             st.markdown(f"**Detection Probability:** {conf_display:.1f}%")
             if conf_display >= 80:
                 st.progress(conf_perc, text=f"High Confidence ")
-                st.success("Target clearly identified. The model is highly confident this is a valid reading target.")
+                st.success("Target clearly identified")
             elif conf_display >= 50:
                 st.progress(conf_perc, text=f"Medium Confidence ")
-                st.warning("Target found, but the model is somewhat unsure. Check for distortion, glare, or partial occlusion.")
+                st.warning("Target found, but the model is somewhat unsure")
             else:
                 st.progress(max(0.0, conf_perc), text=f"Low Confidence ")
-                st.error("Target identification is poor. The image may not contain a valid gauge or clock face.")
+                st.error("Target identification is poor")
         else:
             st.info("No confidence data available.")
