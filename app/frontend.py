@@ -129,35 +129,66 @@ class ClockProcessor(VideoProcessorBase):
 @st.dialog("Cognitive Reasoning Report", width="large")
 def show_reasoning_report(data):
     res = data["result"]
-    
+    is_gauge = "Gauge" in res.get("method", "") or "scale" in res
+
     st.markdown("### 📋 Official Diagnostic Report")
     st.caption(f"Generated on: {time.strftime('%Y-%m-%d %H:%M:%S')}")
     st.divider()
-    
+
     col1, col2 = st.columns([2, 1])
     with col1:
         st.markdown("#### 📝 Executive Summary")
         st.write(f"**Final Reading:** :green[{res.get('time', 'N/A')}]")
         st.write(f"**Detection Method:** {res.get('method', 'N/A')}")
-        
-        c4_conf = res.get("c4_confidence")
-        if c4_conf:
-            tier_colors = {"CERTAIN": "green", "CONFIDENT": "blue", "UNCERTAIN": "orange", "UNRELIABLE": "red"}
-            tier = c4_conf['tier']
-            color = tier_colors.get(tier, "grey")
-            st.markdown(f"**Confidence:** :{color}[{tier}] `{c4_conf['score']}/100`")
+
+        if is_gauge:
+            gauge_conf = res.get("gauge_confidence", {})
+            if gauge_conf:
+                tier = gauge_conf.get("tier", "N/A")
+                score = gauge_conf.get("score", 0)
+                tier_colors = {"HIGH": "green", "MEDIUM": "blue", "LOW": "orange", "UNRELIABLE": "red"}
+                color = tier_colors.get(tier, "grey")
+                st.markdown(f"**Confidence:** :{color}[{tier}] `{score}/100`")
+            else:
+                st.write(f"**Confidence:** {res.get('confidence', 'N/A')}")
+            scale = res.get("scale", {})
+            st.write(f"**Scale Range:** `{scale.get('min', '?')}` → `{scale.get('max', '?')}`")
+            stage_labels = {
+                "manual": "✏️ Manual Override",
+                "gemini": "✨ Gemini Vision",
+                "ocr":    "🔍 EasyOCR Fallback",
+                "failed": "❌ All Stages Failed",
+            }
+            stage = res.get("scale_stage", "failed")
+            st.write(f"**Scale Extraction:** {stage_labels.get(stage, stage)}")
         else:
-            st.write(f"**Confidence:** {res.get('confidence', 'N/A')}")
-            
-        st.write(f"**AM/PM Inference:** {res.get('ampm', 'N/A')}")
-    
+            c4_conf = res.get("c4_confidence")
+            if c4_conf:
+                tier_colors = {"CERTAIN": "green", "CONFIDENT": "blue", "UNCERTAIN": "orange", "UNRELIABLE": "red"}
+                tier = c4_conf['tier']
+                color = tier_colors.get(tier, "grey")
+                st.markdown(f"**Confidence:** :{color}[{tier}] `{c4_conf['score']}/100`")
+            else:
+                st.write(f"**Confidence:** {res.get('confidence', 'N/A')}")
+            st.write(f"**AM/PM Inference:** {res.get('ampm', 'N/A')}")
+
     with col2:
         st.markdown("#### ✅ Pipeline Status")
-        stages = ["C1 Detection", "C2 Keypoints", "C3 Expert AI", "C4 Physics"]
-        for s in stages:
-            is_done = True if "Expert" in res["method"] else (s != "C3 Expert AI")
-            icon_lbl = "✅" if is_done else "❌"
-            st.write(f"{icon_lbl} {s}")
+        if is_gauge:
+            stage = res.get("scale_stage", "failed")
+            stages_gauge = [
+                ("C1 Detection",   True),
+                ("C2 Keypoints",   True),
+                ("Scale Extraction", stage != "failed"),
+                ("C4 Reading",     True),
+            ]
+            for s_name, s_done in stages_gauge:
+                st.write(f"{'✅' if s_done else '❌'} {s_name}")
+        else:
+            stages_clock = ["C1 Detection", "C2 Keypoints", "C3 Expert AI", "C4 Physics"]
+            for s in stages_clock:
+                is_done = True if "Expert" in res["method"] else (s != "C3 Expert AI")
+                st.write(f"{'✅' if is_done else '❌'} {s}")
 
     st.divider()
     st.markdown("#### 🧠 AI Logical Trace")
@@ -167,35 +198,62 @@ def show_reasoning_report(data):
                 st.info(trace)
             elif "Heuristics" in trace:
                 st.success(trace)
-            elif "C4 Confidence" in trace:
+            elif "C4 Confidence" in trace or "Gauge Confidence" in trace:
                 st.warning(trace)
+            elif any(k in trace for k in ["Stage 1", "Stage 2", "Stage 3", "Scale Extraction"]):
+                if "Failed" in trace or "Error" in trace:
+                    st.warning(trace)
+                else:
+                    st.success(trace)
             else:
                 st.write(f"▸ {trace}")
     else:
         st.warning("No trace logs available for this session.")
 
     st.divider()
-    st.markdown("#### 📊 Physics Validation & Research Extension")
-    
-    c4_conf = res.get("c4_confidence")
-    if c4_conf:
-        tier = c4_conf['tier']
-        tier_map = {"CERTAIN": "🟢", "CONFIDENT": "🔵", "UNCERTAIN": "🟠", "UNRELIABLE": "🔴"}
-        st.info(f"{tier_map.get(tier, '⚪')} **C4+ Research Insight:** {c4_conf['reason']}")
-        cA, cB, cC = st.columns(3)
-        cA.metric("Confidence Score", f"{c4_conf['score']}%")
-        cB.metric("Angular Gap", f"{c4_conf['angular_gap']}°")
-        cC.metric("Tier", tier)
-    else:
-        st.warning("C4+ Confidence extension not available for this session.")
+    if is_gauge:
+        st.markdown("#### 📊 Gauge Analysis Detail")
+        angles = res.get("angles", {})
+        gauge_conf = res.get("gauge_confidence", {})
+        kpt_conf = res.get("keypoint_confidence", 0.0)
 
-    col_a, col_b = st.columns(2)
-    with col_a:
-        st.write(f"**Angular Shift (H):** {res.get('angles', {}).get('hand1', 0):.1f}°")
-        st.write(f"**Angular Shift (M):** {res.get('angles', {}).get('hand2', 0):.1f}°")
-    with col_b:
-        st.write(f"**Ambiguity:** {res.get('ambiguity', 'None detected')}")
-        st.write(f"**Accuracy:** {res.get('drift', 'N/A')}")
+        colA, colB, colC = st.columns(3)
+        colA.metric("Scale Span", f"{angles.get('span', 0):.1f}°")
+        colB.metric("Needle Position", f"{angles.get('needle', 0):.1f}°")
+        upd = angles.get("units_per_deg", 0.0)
+        colC.metric("Resolution", f"{upd:.4f} u/°" if upd > 0 else "N/A (fallback)")
+
+        col_g, col_k = st.columns(2)
+        col_g.metric("Reading Confidence", f"{gauge_conf.get('score', 0):.1f}%" if gauge_conf else "N/A")
+        col_k.metric("C2 Keypoint Conf", f"{kpt_conf:.3f}")
+
+        xai_text = res.get("gauge_xai", "")
+        if xai_text:
+            st.markdown("**🤖 Gemini Vision — Gauge XAI Explanation**")
+            st.info(xai_text)
+        else:
+            st.caption("Enable **Force Expert Path** and re-analyze to generate a Gemini Vision explanation of the needle position.")
+    else:
+        st.markdown("#### 📊 Physics Validation & Research Extension")
+        c4_conf = res.get("c4_confidence")
+        if c4_conf:
+            tier = c4_conf['tier']
+            tier_map = {"CERTAIN": "🟢", "CONFIDENT": "🔵", "UNCERTAIN": "🟠", "UNRELIABLE": "🔴"}
+            st.info(f"{tier_map.get(tier, '⚪')} **C4+ Research Insight:** {c4_conf['reason']}")
+            cA, cB, cC = st.columns(3)
+            cA.metric("Confidence Score", f"{c4_conf['score']}%")
+            cB.metric("Angular Gap", f"{c4_conf['angular_gap']}°")
+            cC.metric("Tier", tier)
+        else:
+            st.warning("C4+ Confidence extension not available for this session.")
+
+        col_a, col_b = st.columns(2)
+        with col_a:
+            st.write(f"**Angular Shift (H):** {res.get('angles', {}).get('hand1', 0):.1f}°")
+            st.write(f"**Angular Shift (M):** {res.get('angles', {}).get('hand2', 0):.1f}°")
+        with col_b:
+            st.write(f"**Ambiguity:** {res.get('ambiguity', 'None detected')}")
+            st.write(f"**Accuracy:** {res.get('drift', 'N/A')}")
 
     st.divider()
     if st.button("Close Report", type="primary"):
@@ -555,327 +613,440 @@ def display_results(data):
                 unsafe_allow_html=True
             )
 
+        is_gauge = "Gauge" in res.get("method", "")
         c3_has_data = "c3_crops" in viz and viz["c3_crops"]
 
-        c3s1, c3s2, c3s3, c3s4, c3s5 = st.tabs([
-            "📐 Angle Regression",
-            "🔬 XAI Heatmaps",
-            "🧠 AI Explanations",
-            "📊 Uncertainty",
-            "🔍 Pipeline Debug",
-        ])
-
         # ══════════════════════════════════════════════════════════════════════
-        # SUB-TAB 1 — Angle Regression
+        # GAUGE Expert AI Panel — replaces clock sub-tabs for gauge images
         # ══════════════════════════════════════════════════════════════════════
-        with c3s1:
-            col_a, col_b = st.columns(2)
-            with col_a:
-                if "c3_angles" in viz:
-                    st.image(base64.b64decode(viz["c3_angles"]), caption="Angle Visual", width=300)
-            with col_b:
-                if "angles" in res and res["angles"]:
-                    if "span" in res["angles"]:
-                        st.metric("Scale Span", f"{res['angles'].get('span', 0):.1f}°")
-                        st.metric("Needle Pos",  f"{res['angles'].get('needle', 0):.1f}°")
-                        upd = res["angles"].get("units_per_deg", 0.0)
-                        if upd > 0:
-                            st.markdown(f"**1° =** `{upd:.4f}` scale units")
-                    else:
-                        h_ang = res["angles"].get("hand1", 0)
-                        m_ang = res["angles"].get("hand2", 0)
-                        st.metric("Hour Hand",   f"{h_ang:.1f}°")
-                        st.metric("Minute Hand", f"{m_ang:.1f}°")
+        if is_gauge:
+            gx1, gx2, gx3, gx4 = st.tabs([
+                "📐 Needle Analysis",
+                "🔍 Scale Extraction",
+                "🤖 AI Explanation",
+                "🔬 Debug Log",
+            ])
 
-            if c3_has_data:
-                st.markdown("---")
-                st.markdown(
-                    f"**{icon('image')} ResNet-18 Input Crops (MC Dropout active)**",
-                    unsafe_allow_html=True
-                )
-                c_cols = st.columns(max(len(viz["c3_crops"]), 1))
-                for idx, (col, crop) in enumerate(zip(c_cols, viz["c3_crops"])):
-                    col.image(base64.b64decode(crop), caption=f"Hand {idx+1} crop (64×64)", width=120)
-
-            if not c3_has_data:
-                st.info("Expert AI skipped (Fast Path or Gauge Mode). Enable 'Force Expert Path' to activate.")
-
-        # ══════════════════════════════════════════════════════════════════════
-        # SUB-TAB 2 — XAI Heatmaps
-        # ══════════════════════════════════════════════════════════════════════
-        with c3s2:
-            if not c3_has_data:
-                st.info("No XAI heatmaps — run with Force Expert Path.")
-            else:
-                xai_t1, xai_t2, xai_t3, xai_t4 = st.tabs(
-                    ["🔥 GradCAM++", "🧮 Integrated Gradients", "🟩 LIME", "🔴 SHAP"]
-                )
-
-                with xai_t1:
-                    if data.get("heatmap_b64"):
-                        st.image(base64.b64decode(data["heatmap_b64"]),
-                                 caption="GradCAM++ — fused L2×0.20 + L3×0.30 + L4×0.50 + quadrant annotation",
-                                 width=400)
-                        # AFS badges
-                        afs_list = res.get("afs_scores", [])
-                        if afs_list:
-                            st.markdown("**Attribution Fidelity Score (ROAR — top-20% pixels blanked)**")
-                            afs_cols = st.columns(len(afs_list))
-                            for ac, afs in zip(afs_cols, afs_list):
-                                afs_val   = afs.get("afs", 0.0)
-                                afs_pct   = int(afs_val * 100)
-                                afs_color = "#22c55e" if afs_val > 0.5 else "#f59e0b" if afs_val > 0.25 else "#ef4444"
-                                causal_lbl = "Causal ✅" if afs_val > 0.5 else "Weak ⚠️" if afs_val > 0.25 else "Not causal ❌"
-                                ac.markdown(
-                                    f"<div style='text-align:center;padding:8px;background:#0f0f1a;"
-                                    f"border:1px solid {afs_color}44;border-radius:8px;'>"
-                                    f"<div style='color:#64748b;font-size:10px;'>maskedΔ={afs.get('delta_deg',0):.1f}°</div>"
-                                    f"<div style='color:{afs_color};font-size:22px;font-weight:800;'>AFS {afs_pct}%</div>"
-                                    f"<div style='color:#475569;font-size:10px;'>{causal_lbl}</div>"
-                                    f"</div>",
-                                    unsafe_allow_html=True
-                                )
-                    else:
-                        st.info("GradCAM++ heatmap not available.")
-
-                with xai_t2:
-                    ig_found = False
-                    for hi in range(1, 3):
-                        key = f"xai_ig_h{hi}"
-                        if key in viz and viz[key]:
-                            st.image(base64.b64decode(viz[key]),
-                                     caption=f"Integrated Gradients — Hand {hi} (HOT colourmap, 50 steps)",
-                                     width=300)
-                            ig_found = True
-                    if not ig_found:
-                        st.info("IG overlay requires **Force Expert Path**.")
-                    st.caption(
-                        "IG satisfies Completeness • Sensitivity • Implementation Invariance "
-                        "(Sundararajan et al., ICML 2017) — theoretically grounded for regression."
-                    )
-
-                with xai_t3:
-                    lime_found = False
-                    for hi in range(1, 3):
-                        key = f"xai_lime_h{hi}"
-                        if key in viz and viz[key]:
-                            st.image(base64.b64decode(viz[key]),
-                                     caption=f"LIME — Hand {hi} (top-5 superpixels, 200 perturbations)", width=300)
-                            lime_found = True
-                    if not lime_found:
-                        st.info("LIME requires `pip install lime` + Force Expert Path.")
-
-                with xai_t4:
-                    shap_found = False
-                    for hi in range(1, 3):
-                        key = f"xai_shap_h{hi}"
-                        if key in viz and viz[key]:
-                            st.image(base64.b64decode(viz[key]),
-                                     caption=f"SHAP — Hand {hi} attribution (red=high positive influence)", width=300)
-                            shap_found = True
-                    if not shap_found:
-                        st.info("SHAP requires `pip install shap` + Force Expert Path.")
-
-        # ══════════════════════════════════════════════════════════════════════
-        # SUB-TAB 3 — AI Explanations
-        # ══════════════════════════════════════════════════════════════════════
-        with c3s3:
-            # — Local / Gemini cards —
-            xai_exps = res.get("xai_explanations", [])
-            if xai_exps:
-                st.markdown(f"#### {icon('psychology')} AI Explanation per Hand", unsafe_allow_html=True)
-                for exp in xai_exps:
-                    h_num   = exp.get("hand", "?")
-                    source  = exp.get("source", "Local")
-                    text    = exp.get("explanation", "")
-                    entropy = exp.get("entropy", 0.0)
-                    routing = exp.get("routing_reason", "")
-
-                    if source == "Gemini":
-                        bc, bi, bl = "#a78bfa", "✨", "Gemini Vision"
-                    else:
-                        bc, bi, bl = "#38bdf8", "🔵", "Local Heuristic"
-
-                    st.markdown(f"""
-                    <div style="background:#0f0f1a;border:1px solid {bc}33;
-                                border-radius:10px;padding:14px 16px;margin-bottom:10px;">
-                        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
-                            <span style="background:{bc}22;color:{bc};padding:2px 10px;
-                                         border-radius:4px;font-size:11px;font-weight:700;
-                                         border:1px solid {bc}44;">{bi} {bl}</span>
-                            <span style="color:#94a3b8;font-size:12px;">Hand {h_num}</span>
-                            <span style="color:#64748b;font-size:11px;margin-left:auto;">entropy={entropy:.3f}</span>
-                        </div>
-                        <div style="color:#e2e8f0;font-size:13px;line-height:1.5;">{text}</div>
-                        <div style="color:#475569;font-size:10px;margin-top:6px;">Routing: {routing}</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-            else:
-                st.info("No AI explanations yet — run analysis to populate.")
-
-            # — Contrastive XAI —
-            contrastive = res.get("contrastive_xai", "")
-            if contrastive:
-                st.markdown("---")
-                st.markdown(f"#### {icon('compare_arrows')} Contrastive XAI — Why this time?",
-                            unsafe_allow_html=True)
-                lines = contrastive.split("\n")
-                if lines:
-                    st.markdown(f"**{lines[0]}**")
-                for line in lines[1:]:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    color = "#22c55e" if "✅" in line else "#ef4444" if "❌" in line else "#94a3b8"
-                    st.markdown(
-                        f"<div style='padding:4px 10px;margin:2px 0;border-left:3px solid {color};"
-                        f"background:{color}11;border-radius:0 4px 4px 0;font-size:13px;color:#e2e8f0;'>"
-                        f"{line}</div>",
-                        unsafe_allow_html=True
-                    )
-
-        # ══════════════════════════════════════════════════════════════════════
-        # SUB-TAB 4 — Uncertainty & Calibration
-        # ══════════════════════════════════════════════════════════════════════
-        with c3s4:
-            # Structured per-hand cards
-            per_hand = res.get("per_hand_xai", [])
-            if per_hand:
-                st.markdown(f"#### {icon('analytics')} MC Dropout — Per-Hand Uncertainty (20 passes)",
-                            unsafe_allow_html=True)
-                cols = st.columns(len(per_hand))
-                for col, h in zip(cols, per_hand):
-                    sig   = h.get("uncertainty_std", 0.0)
-                    alpha = h.get("alpha", 1.0)
-                    delta = h.get("delta", 0.0)
-                    c3a   = h.get("c3_angle", 0.0)
-                    raw_a = h.get("rough_angle", 0.0)
-                    ent   = h.get("entropy", 0.0)
-                    u_raw = h.get("uncertainty_raw", sig)
-                    temp  = h.get("temperature", 1.0)
-
-                    sc = "#22c55e" if sig < 5.0 else "#f59e0b" if sig < 15.0 else "#ef4444"
-                    sg = "High Confidence" if sig < 5.0 else "Moderate" if sig < 15.0 else "Low — C2 preferred"
-
-                    col.markdown(f"""
-                    <div style="background:#0f0f1a;border:1px solid {sc}44;
-                                border-radius:10px;padding:12px;text-align:center;">
-                        <div style="color:#94a3b8;font-size:10px;">Hand {h.get('hand','?')}</div>
-                        <div style="color:{sc};font-size:28px;font-weight:800;margin:4px 0;">
-                            ±{sig:.1f}°
-                        </div>
-                        <div style="color:#64748b;font-size:10px;">{sg}</div>
-                        <div style="margin:8px 0;background:#1e293b;border-radius:3px;height:5px;">
-                            <div style="width:{int(alpha*100)}%;height:5px;
-                                        background:{sc};border-radius:3px;"></div>
-                        </div>
-                        <div style="color:#64748b;font-size:10px;">α = {alpha:.2f}</div>
-                        <div style="color:#475569;font-size:10px;margin-top:4px;">
-                            C2={raw_a:.1f}° → C3={c3a:.1f}° (δ={delta:+.1f}°)
-                        </div>
-                        <div style="color:#334155;font-size:10px;">entropy={ent:.3f}</div>
-                        <div style="color:#1e3a5f;font-size:9px;margin-top:3px;">
-                            raw σ={u_raw:.1f}° × T={temp:.2f} → {sig:.1f}°
-                        </div>
-                    </div>
-                    """, unsafe_allow_html=True)
-
-            # Legacy summary string (always show if present)
-            unc_str = res.get("uncertainty_deg", "")
-            if unc_str and unc_str != "N/A":
-                st.markdown("---")
-                st.caption(f"**Summary:** {unc_str}")
-                unc_parts = [p.strip() for p in unc_str.split(",") if p.strip()]
-                unc_cols  = st.columns(len(unc_parts)) if unc_parts else []
-                for col, part in zip(unc_cols, unc_parts):
-                    try:
-                        label, val_str = part.split("=")
-                        sigma = float(val_str.replace("±", "").replace("°", "").strip())
-                        alpha = max(0.0, min(1.0, 1.0 - sigma / 20.0))
-                        color = "#22c55e" if sigma < 5.0 else "#f59e0b" if sigma < 15.0 else "#ef4444"
-                        grade = "High" if sigma < 5.0 else "Moderate" if sigma < 15.0 else "Low"
-                        col.markdown(
-                            f"<div style='background:#0f0f1a;border:1px solid {color}44;"
-                            f"border-radius:8px;padding:10px;text-align:center;'>"
-                            f"<div style='color:#64748b;font-size:10px;'>{label.strip()}</div>"
-                            f"<div style='color:{color};font-size:22px;font-weight:800;'>±{sigma:.1f}°</div>"
-                            f"<div style='color:#475569;font-size:10px;'>{grade} · α={alpha:.2f}</div>"
-                            f"</div>",
+            with gx1:
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    if "c3_angles" in viz:
+                        st.image(base64.b64decode(viz["c3_angles"]), caption="Gauge Angle Visual", width=300)
+                    elif "c2_skeleton" in viz:
+                        st.image(base64.b64decode(viz["c2_skeleton"]), caption="Gauge Skeleton", width=300)
+                with col_b:
+                    angles = res.get("angles", {})
+                    gauge_conf = res.get("gauge_confidence", {})
+                    kpt_conf = res.get("keypoint_confidence", 0.0)
+                    st.metric("Scale Span", f"{angles.get('span', 0):.1f}°")
+                    st.metric("Needle Position", f"{angles.get('needle', 0):.1f}°")
+                    upd = angles.get("units_per_deg", 0.0)
+                    if upd > 0:
+                        st.markdown(f"**1° =** `{upd:.4f}` scale units")
+                    st.divider()
+                    st.metric("C2 Keypoint Conf", f"{kpt_conf:.3f}")
+                    if gauge_conf:
+                        tier = gauge_conf.get("tier", "N/A")
+                        score = gauge_conf.get("score", 0)
+                        tier_colors = {"HIGH": "#22c55e", "MEDIUM": "#38bdf8", "LOW": "#f59e0b", "UNRELIABLE": "#ef4444"}
+                        tc = tier_colors.get(tier, "#94a3b8")
+                        st.markdown(
+                            f"<div style='text-align:center;padding:10px;background:#0f0f1a;"
+                            f"border:1px solid {tc}44;border-radius:8px;margin-top:8px;'>"
+                            f"<div style='color:#64748b;font-size:10px;'>Reading Confidence</div>"
+                            f"<div style='color:{tc};font-size:26px;font-weight:800;'>{score:.0f}%</div>"
+                            f"<div style='color:#475569;font-size:10px;'>{tier}</div></div>",
                             unsafe_allow_html=True
                         )
-                    except Exception:
-                        col.code(part)
 
-            with st.expander("ℹ️ How MC Dropout + Kalman works"):
-                st.markdown("""
-                **MC Dropout** keeps `Dropout(0.3)` stochastic during inference.
-                **20 forward passes** → circular σ (uncertainty):
-                - σ < 5° → **High Confidence** — C3 dominates (α ≈ 1.0)
-                - σ 5–15° → **Moderate** — blended C2 + C3
-                - σ > 15° → **Low** — C2 geometry preferred (α → 0)
+            with gx2:
+                scale = res.get("scale", {})
+                stage = res.get("scale_stage", "failed")
+                stage_info = {
+                    "manual": ("✏️ Manual Override",    "#22c55e", "User-provided min/max values were used directly."),
+                    "gemini": ("✨ Gemini Vision API",  "#a78bfa", "Gemini 2.5 Flash read the scale from the gauge image."),
+                    "ocr":    ("🔍 EasyOCR Fallback",   "#38bdf8", "Local EasyOCR with inward-shift cropping was used."),
+                    "failed": ("❌ All Stages Failed",  "#ef4444", "Could not extract the scale. Reading is a raw needle percentage."),
+                }
+                label, color, desc = stage_info.get(stage, ("Unknown", "#64748b", ""))
+                st.markdown(
+                    f"<div style='background:#0f0f1a;border:1px solid {color}33;"
+                    f"border-radius:10px;padding:16px;margin-bottom:16px;'>"
+                    f"<div style='color:{color};font-size:17px;font-weight:700;margin-bottom:5px;'>{label}</div>"
+                    f"<div style='color:#94a3b8;font-size:13px;'>{desc}</div></div>",
+                    unsafe_allow_html=True
+                )
+                col_min, col_max = st.columns(2)
+                col_min.metric("Scale Minimum", str(scale.get("min", "?")))
+                col_max.metric("Scale Maximum", str(scale.get("max", "?")))
+                st.caption("To override scale values, use **Manual Gauge Scale Overrides** in the configuration panel and re-analyze.")
 
-                **Temperature scaling:** `σ_cal = σ_raw × T`  (T=1.0 = uncalibrated)
-
-                **C3 Kalman Smoother** (new): after blending, each hand's output is
-                passed through a per-hand circular Kalman filter `[angle, velocity]`
-                to eliminate frame-to-frame spikes during live video mode.
-                """)
-
-            if not per_hand and not unc_str:
-                st.info("No uncertainty data — run with Expert Path active.")
-
-        # ══════════════════════════════════════════════════════════════════════
-        # SUB-TAB 5 — Pipeline Debug
-        # ══════════════════════════════════════════════════════════════════════
-        with c3s5:
-            debug_lines = res.get("debug", [])
-            if debug_lines:
-                def _icon_for(line: str) -> str:
-                    l = line.lower()
-                    if any(k in l for k in ["error", "failed", "rejected", "❌"]):
-                        return "🔴"
-                    if any(k in l for k in ["warning", "⚠", "slow", "ambiguity"]):
-                        return "⚠️"
-                    if any(k in l for k in ["xai", "gemini", "local xai", "entropy", "roar", "ig"]):
-                        return "🔵"
-                    if any(k in l for k in ["kalman", "smooth"]):
-                        return "🟣"
-                    if any(k in l for k in ["accepted", "✅", "ok", "success", "passed"]):
-                        return "✅"
-                    if any(k in l for k in ["c1:", "c2", "c3", "c4", "physics"]):
-                        return "🟢"
-                    return "▪️"
-
-                # Group filter
-                filter_opts = ["All", "🔴 Errors", "🔵 XAI", "🟢 Pipeline", "⚠️ Warnings", "🟣 Kalman"]
-                f_col, _ = st.columns([1, 3])
-                chosen = f_col.selectbox("Filter", filter_opts, label_visibility="collapsed")
-
-                filtered = debug_lines
-                if chosen == "🔴 Errors":
-                    filtered = [l for l in debug_lines if any(k in l.lower() for k in ["error", "failed", "❌"])]
-                elif chosen == "🔵 XAI":
-                    filtered = [l for l in debug_lines if any(k in l.lower() for k in ["xai", "gemini", "entropy", "roar", "ig"])]
-                elif chosen == "🟢 Pipeline":
-                    filtered = [l for l in debug_lines if any(k in l.lower() for k in ["c1:", "c2", "c3", "c4", "physics"])]
-                elif chosen == "⚠️ Warnings":
-                    filtered = [l for l in debug_lines if any(k in l.lower() for k in ["warning", "⚠", "ambiguity"])]
-                elif chosen == "🟣 Kalman":
-                    filtered = [l for l in debug_lines if any(k in l.lower() for k in ["kalman", "smooth"])]
-
-                st.caption(f"Showing {len(filtered)} / {len(debug_lines)} steps")
-                for step_i, line in enumerate(filtered, 1):
-                    badge = _icon_for(line)
+            with gx3:
+                xai_text = res.get("gauge_xai", "")
+                if xai_text:
                     st.markdown(
-                        f"<div style='font-family:monospace;font-size:11px;padding:2px 8px;"
-                        f"border-radius:3px;margin:1px 0;color:#94a3b8;background:#0a0a14;'>"
-                        f"<span style='color:#475569;'>[{step_i:02d}]</span> {badge} {line}</div>",
+                        "<span style='background:#a78bfa22;color:#a78bfa;padding:3px 10px;"
+                        "border-radius:4px;font-size:11px;font-weight:700;border:1px solid #a78bfa44;'>"
+                        "✨ Gemini Vision — Gauge XAI</span>",
                         unsafe_allow_html=True
                     )
-            else:
-                st.info("No debug log — run with Expert Path to see pipeline steps.")
+                    st.markdown(
+                        f"<div style='background:#0f0f1a;border:1px solid #a78bfa33;"
+                        f"border-radius:10px;padding:16px;margin-top:12px;'>"
+                        f"<div style='color:#e2e8f0;font-size:13px;line-height:1.7;'>{xai_text}</div></div>",
+                        unsafe_allow_html=True
+                    )
+                else:
+                    st.markdown(
+                        "<div style='background:#0f0f1a;border:1px solid #334155;"
+                        "border-radius:10px;padding:28px;text-align:center;margin-top:8px;'>"
+                        "<div style='font-size:36px;margin-bottom:10px;'>🤖</div>"
+                        "<div style='color:#94a3b8;font-size:14px;font-weight:600;'>Gemini Gauge XAI not available</div>"
+                        "<div style='color:#475569;font-size:12px;margin-top:8px;'>"
+                        "Enable <strong style='color:#a78bfa;'>Force Expert Path</strong> and re-analyze "
+                        "to generate a Gemini Vision explanation of the needle position."
+                        "</div></div>",
+                        unsafe_allow_html=True
+                    )
 
-        # (All C3 features are now in the 5 sub-tabs above)
+            with gx4:
+                debug_lines = res.get("debug", [])
+                gauge_keys = ["C1:", "C2", "Stage", "Shadow", "Final", "Scale", "Gauge", "Reversed"]
+                gauge_debug = [l for l in debug_lines if any(k in l for k in gauge_keys)]
+                if gauge_debug:
+                    st.caption(f"Showing {len(gauge_debug)} / {len(debug_lines)} gauge-relevant steps")
+                    for step_i, line in enumerate(gauge_debug, 1):
+                        badge = "🟢" if not any(k in line for k in ["Failed", "Error", "❌"]) else "🔴"
+                        st.markdown(
+                            f"<div style='font-family:monospace;font-size:11px;padding:2px 8px;"
+                            f"border-radius:3px;margin:1px 0;color:#94a3b8;background:#0a0a14;'>"
+                            f"<span style='color:#475569;'>[{step_i:02d}]</span> {badge} {line}</div>",
+                            unsafe_allow_html=True
+                        )
+                else:
+                    st.info("No debug log available.")
+
+        else:  # ══ CLOCK Expert AI Panel (unchanged) ════════════════════════
+            c3s1, c3s2, c3s3, c3s4, c3s5 = st.tabs([
+                "📐 Angle Regression",
+                "🔬 XAI Heatmaps",
+                "🧠 AI Explanations",
+                "📊 Uncertainty",
+                "🔍 Pipeline Debug",
+            ])
+
+
+            # ══════════════════════════════════════════════════════════════════════
+            # SUB-TAB 1 — Angle Regression
+            # ══════════════════════════════════════════════════════════════════════
+            with c3s1:
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    if "c3_angles" in viz:
+                        st.image(base64.b64decode(viz["c3_angles"]), caption="Angle Visual", width=300)
+                with col_b:
+                    if "angles" in res and res["angles"]:
+                        if "span" in res["angles"]:
+                            st.metric("Scale Span", f"{res['angles'].get('span', 0):.1f}°")
+                            st.metric("Needle Pos",  f"{res['angles'].get('needle', 0):.1f}°")
+                            upd = res["angles"].get("units_per_deg", 0.0)
+                            if upd > 0:
+                                st.markdown(f"**1° =** `{upd:.4f}` scale units")
+                        else:
+                            h_ang = res["angles"].get("hand1", 0)
+                            m_ang = res["angles"].get("hand2", 0)
+                            st.metric("Hour Hand",   f"{h_ang:.1f}°")
+                            st.metric("Minute Hand", f"{m_ang:.1f}°")
+
+                if c3_has_data:
+                    st.markdown("---")
+                    st.markdown(
+                        f"**{icon('image')} ResNet-18 Input Crops (MC Dropout active)**",
+                        unsafe_allow_html=True
+                    )
+                    c_cols = st.columns(max(len(viz["c3_crops"]), 1))
+                    for idx, (col, crop) in enumerate(zip(c_cols, viz["c3_crops"])):
+                        col.image(base64.b64decode(crop), caption=f"Hand {idx+1} crop (64×64)", width=120)
+
+                if not c3_has_data:
+                    st.info("Expert AI skipped (Fast Path). Enable 'Force Expert Path' to activate.")
+
+            # ══════════════════════════════════════════════════════════════════════
+            # SUB-TAB 2 — XAI Heatmaps
+            # ══════════════════════════════════════════════════════════════════════
+            with c3s2:
+                if not c3_has_data:
+                    st.info("No XAI heatmaps — run with Force Expert Path.")
+                else:
+                    xai_t1, xai_t2, xai_t3, xai_t4 = st.tabs(
+                        ["🔥 GradCAM++", "🧮 Integrated Gradients", "🟩 LIME", "🔴 SHAP"]
+                    )
+
+                    with xai_t1:
+                        if data.get("heatmap_b64"):
+                            st.image(base64.b64decode(data["heatmap_b64"]),
+                                     caption="GradCAM++ — fused L2×0.20 + L3×0.30 + L4×0.50 + quadrant annotation",
+                                     width=400)
+                            # AFS badges
+                            afs_list = res.get("afs_scores", [])
+                            if afs_list:
+                                st.markdown("**Attribution Fidelity Score (ROAR — top-20% pixels blanked)**")
+                                afs_cols = st.columns(len(afs_list))
+                                for ac, afs in zip(afs_cols, afs_list):
+                                    afs_val   = afs.get("afs", 0.0)
+                                    afs_pct   = int(afs_val * 100)
+                                    afs_color = "#22c55e" if afs_val > 0.5 else "#f59e0b" if afs_val > 0.25 else "#ef4444"
+                                    causal_lbl = "Causal ✅" if afs_val > 0.5 else "Weak ⚠️" if afs_val > 0.25 else "Not causal ❌"
+                                    ac.markdown(
+                                        f"<div style='text-align:center;padding:8px;background:#0f0f1a;"
+                                        f"border:1px solid {afs_color}44;border-radius:8px;'>"
+                                        f"<div style='color:#64748b;font-size:10px;'>maskedΔ={afs.get('delta_deg',0):.1f}°</div>"
+                                        f"<div style='color:{afs_color};font-size:22px;font-weight:800;'>AFS {afs_pct}%</div>"
+                                        f"<div style='color:#475569;font-size:10px;'>{causal_lbl}</div>"
+                                        f"</div>",
+                                        unsafe_allow_html=True
+                                    )
+                        else:
+                            st.info("GradCAM++ heatmap not available.")
+
+                    with xai_t2:
+                        ig_found = False
+                        for hi in range(1, 3):
+                            key = f"xai_ig_h{hi}"
+                            if key in viz and viz[key]:
+                                st.image(base64.b64decode(viz[key]),
+                                         caption=f"Integrated Gradients — Hand {hi} (HOT colourmap, 50 steps)",
+                                         width=300)
+                                ig_found = True
+                        if not ig_found:
+                            st.info("IG overlay requires **Force Expert Path**.")
+                        st.caption(
+                            "IG satisfies Completeness • Sensitivity • Implementation Invariance "
+                            "(Sundararajan et al., ICML 2017) — theoretically grounded for regression."
+                        )
+
+                    with xai_t3:
+                        lime_found = False
+                        for hi in range(1, 3):
+                            key = f"xai_lime_h{hi}"
+                            if key in viz and viz[key]:
+                                st.image(base64.b64decode(viz[key]),
+                                         caption=f"LIME — Hand {hi} (top-5 superpixels, 200 perturbations)", width=300)
+                                lime_found = True
+                        if not lime_found:
+                            st.info("LIME requires `pip install lime` + Force Expert Path.")
+
+                    with xai_t4:
+                        shap_found = False
+                        for hi in range(1, 3):
+                            key = f"xai_shap_h{hi}"
+                            if key in viz and viz[key]:
+                                st.image(base64.b64decode(viz[key]),
+                                         caption=f"SHAP — Hand {hi} attribution (red=high positive influence)", width=300)
+                                shap_found = True
+                        if not shap_found:
+                            st.info("SHAP requires `pip install shap` + Force Expert Path.")
+
+            # ══════════════════════════════════════════════════════════════════════
+            # SUB-TAB 3 — AI Explanations
+            # ══════════════════════════════════════════════════════════════════════
+            with c3s3:
+                # — Local / Gemini cards —
+                xai_exps = res.get("xai_explanations", [])
+                if xai_exps:
+                    st.markdown(f"#### {icon('psychology')} AI Explanation per Hand", unsafe_allow_html=True)
+                    for exp in xai_exps:
+                        h_num   = exp.get("hand", "?")
+                        source  = exp.get("source", "Local")
+                        text    = exp.get("explanation", "")
+                        entropy = exp.get("entropy", 0.0)
+                        routing = exp.get("routing_reason", "")
+
+                        if source == "Gemini":
+                            bc, bi, bl = "#a78bfa", "✨", "Gemini Vision"
+                        else:
+                            bc, bi, bl = "#38bdf8", "🔵", "Local Heuristic"
+
+                        st.markdown(f"""
+                        <div style="background:#0f0f1a;border:1px solid {bc}33;
+                                    border-radius:10px;padding:14px 16px;margin-bottom:10px;">
+                            <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+                                <span style="background:{bc}22;color:{bc};padding:2px 10px;
+                                             border-radius:4px;font-size:11px;font-weight:700;
+                                             border:1px solid {bc}44;">{bi} {bl}</span>
+                                <span style="color:#94a3b8;font-size:12px;">Hand {h_num}</span>
+                                <span style="color:#64748b;font-size:11px;margin-left:auto;">entropy={entropy:.3f}</span>
+                            </div>
+                            <div style="color:#e2e8f0;font-size:13px;line-height:1.5;">{text}</div>
+                            <div style="color:#475569;font-size:10px;margin-top:6px;">Routing: {routing}</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                else:
+                    st.info("No AI explanations yet — run analysis to populate.")
+
+                # — Contrastive XAI —
+                contrastive = res.get("contrastive_xai", "")
+                if contrastive:
+                    st.markdown("---")
+                    st.markdown(f"#### {icon('compare_arrows')} Contrastive XAI — Why this time?",
+                                unsafe_allow_html=True)
+                    lines = contrastive.split("\n")
+                    if lines:
+                        st.markdown(f"**{lines[0]}**")
+                    for line in lines[1:]:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        color = "#22c55e" if "✅" in line else "#ef4444" if "❌" in line else "#94a3b8"
+                        st.markdown(
+                            f"<div style='padding:4px 10px;margin:2px 0;border-left:3px solid {color};"
+                            f"background:{color}11;border-radius:0 4px 4px 0;font-size:13px;color:#e2e8f0;'>"
+                            f"{line}</div>",
+                            unsafe_allow_html=True
+                        )
+
+            # ══════════════════════════════════════════════════════════════════════
+            # SUB-TAB 4 — Uncertainty & Calibration
+            # ══════════════════════════════════════════════════════════════════════
+            with c3s4:
+                # Structured per-hand cards
+                per_hand = res.get("per_hand_xai", [])
+                if per_hand:
+                    st.markdown(f"#### {icon('analytics')} MC Dropout — Per-Hand Uncertainty (20 passes)",
+                                unsafe_allow_html=True)
+                    cols = st.columns(len(per_hand))
+                    for col, h in zip(cols, per_hand):
+                        sig   = h.get("uncertainty_std", 0.0)
+                        alpha = h.get("alpha", 1.0)
+                        delta = h.get("delta", 0.0)
+                        c3a   = h.get("c3_angle", 0.0)
+                        raw_a = h.get("rough_angle", 0.0)
+                        ent   = h.get("entropy", 0.0)
+                        u_raw = h.get("uncertainty_raw", sig)
+                        temp  = h.get("temperature", 1.0)
+
+                        sc = "#22c55e" if sig < 5.0 else "#f59e0b" if sig < 15.0 else "#ef4444"
+                        sg = "High Confidence" if sig < 5.0 else "Moderate" if sig < 15.0 else "Low — C2 preferred"
+
+                        col.markdown(f"""
+                        <div style="background:#0f0f1a;border:1px solid {sc}44;
+                                    border-radius:10px;padding:12px;text-align:center;">
+                            <div style="color:#94a3b8;font-size:10px;">Hand {h.get('hand','?')}</div>
+                            <div style="color:{sc};font-size:28px;font-weight:800;margin:4px 0;">
+                                ±{sig:.1f}°
+                            </div>
+                            <div style="color:#64748b;font-size:10px;">{sg}</div>
+                            <div style="margin:8px 0;background:#1e293b;border-radius:3px;height:5px;">
+                                <div style="width:{int(alpha*100)}%;height:5px;
+                                            background:{sc};border-radius:3px;"></div>
+                            </div>
+                            <div style="color:#64748b;font-size:10px;">α = {alpha:.2f}</div>
+                            <div style="color:#475569;font-size:10px;margin-top:4px;">
+                                C2={raw_a:.1f}° → C3={c3a:.1f}° (δ={delta:+.1f}°)
+                            </div>
+                            <div style="color:#334155;font-size:10px;">entropy={ent:.3f}</div>
+                            <div style="color:#1e3a5f;font-size:9px;margin-top:3px;">
+                                raw σ={u_raw:.1f}° × T={temp:.2f} → {sig:.1f}°
+                            </div>
+                        </div>
+                        """, unsafe_allow_html=True)
+
+                # Legacy summary string (always show if present)
+                unc_str = res.get("uncertainty_deg", "")
+                if unc_str and unc_str != "N/A":
+                    st.markdown("---")
+                    st.caption(f"**Summary:** {unc_str}")
+                    unc_parts = [p.strip() for p in unc_str.split(",") if p.strip()]
+                    unc_cols  = st.columns(len(unc_parts)) if unc_parts else []
+                    for col, part in zip(unc_cols, unc_parts):
+                        try:
+                            label, val_str = part.split("=")
+                            sigma = float(val_str.replace("±", "").replace("°", "").strip())
+                            alpha = max(0.0, min(1.0, 1.0 - sigma / 20.0))
+                            color = "#22c55e" if sigma < 5.0 else "#f59e0b" if sigma < 15.0 else "#ef4444"
+                            grade = "High" if sigma < 5.0 else "Moderate" if sigma < 15.0 else "Low"
+                            col.markdown(
+                                f"<div style='background:#0f0f1a;border:1px solid {color}44;"
+                                f"border-radius:8px;padding:10px;text-align:center;'>"
+                                f"<div style='color:#64748b;font-size:10px;'>{label.strip()}</div>"
+                                f"<div style='color:{color};font-size:22px;font-weight:800;'>±{sigma:.1f}°</div>"
+                                f"<div style='color:#475569;font-size:10px;'>{grade} · α={alpha:.2f}</div>"
+                                f"</div>",
+                                unsafe_allow_html=True
+                            )
+                        except Exception:
+                            col.code(part)
+
+                with st.expander("ℹ️ How MC Dropout + Kalman works"):
+                    st.markdown("""
+                    **MC Dropout** keeps `Dropout(0.3)` stochastic during inference.
+                    **20 forward passes** → circular σ (uncertainty):
+                    - σ < 5° → **High Confidence** — C3 dominates (α ≈ 1.0)
+                    - σ 5–15° → **Moderate** — blended C2 + C3
+                    - σ > 15° → **Low** — C2 geometry preferred (α → 0)
+
+                    **Temperature scaling:** `σ_cal = σ_raw × T`  (T=1.0 = uncalibrated)
+
+                    **C3 Kalman Smoother** (new): after blending, each hand's output is
+                    passed through a per-hand circular Kalman filter `[angle, velocity]`
+                    to eliminate frame-to-frame spikes during live video mode.
+                    """)
+
+                if not per_hand and not unc_str:
+                    st.info("No uncertainty data — run with Expert Path active.")
+
+            # ══════════════════════════════════════════════════════════════════════
+            # SUB-TAB 5 — Pipeline Debug
+            # ══════════════════════════════════════════════════════════════════════
+            with c3s5:
+                debug_lines = res.get("debug", [])
+                if debug_lines:
+                    def _icon_for(line: str) -> str:
+                        l = line.lower()
+                        if any(k in l for k in ["error", "failed", "rejected", "❌"]):
+                            return "🔴"
+                        if any(k in l for k in ["warning", "⚠", "slow", "ambiguity"]):
+                            return "⚠️"
+                        if any(k in l for k in ["xai", "gemini", "local xai", "entropy", "roar", "ig"]):
+                            return "🔵"
+                        if any(k in l for k in ["kalman", "smooth"]):
+                            return "🟣"
+                        if any(k in l for k in ["accepted", "✅", "ok", "success", "passed"]):
+                            return "✅"
+                        if any(k in l for k in ["c1:", "c2", "c3", "c4", "physics"]):
+                            return "🟢"
+                        return "▪️"
+
+                    # Group filter
+                    filter_opts = ["All", "🔴 Errors", "🔵 XAI", "🟢 Pipeline", "⚠️ Warnings", "🟣 Kalman"]
+                    f_col, _ = st.columns([1, 3])
+                    chosen = f_col.selectbox("Filter", filter_opts, label_visibility="collapsed")
+
+                    filtered = debug_lines
+                    if chosen == "🔴 Errors":
+                        filtered = [l for l in debug_lines if any(k in l.lower() for k in ["error", "failed", "❌"])]
+                    elif chosen == "🔵 XAI":
+                        filtered = [l for l in debug_lines if any(k in l.lower() for k in ["xai", "gemini", "entropy", "roar", "ig"])]
+                    elif chosen == "🟢 Pipeline":
+                        filtered = [l for l in debug_lines if any(k in l.lower() for k in ["c1:", "c2", "c3", "c4", "physics"])]
+                    elif chosen == "⚠️ Warnings":
+                        filtered = [l for l in debug_lines if any(k in l.lower() for k in ["warning", "⚠", "ambiguity"])]
+                    elif chosen == "🟣 Kalman":
+                        filtered = [l for l in debug_lines if any(k in l.lower() for k in ["kalman", "smooth"])]
+
+                    st.caption(f"Showing {len(filtered)} / {len(debug_lines)} steps")
+                    for step_i, line in enumerate(filtered, 1):
+                        badge = _icon_for(line)
+                        st.markdown(
+                            f"<div style='font-family:monospace;font-size:11px;padding:2px 8px;"
+                            f"border-radius:3px;margin:1px 0;color:#94a3b8;background:#0a0a14;'>"
+                            f"<span style='color:#475569;'>[{step_i:02d}]</span> {badge} {line}</div>",
+                            unsafe_allow_html=True
+                        )
+                else:
+                    st.info("No debug log — run with Expert Path to see pipeline steps.")
+
+            # (All C3 features are now in the 5 sub-tabs above)
 
 
 
@@ -1069,6 +1240,96 @@ if st.session_state.page == "analysis":
     # Display results if they exist in session state
     if "analysis_result" in st.session_state and st.session_state.analysis_result:
         display_results(st.session_state.analysis_result)
+
+        # ── Conditional Gauge Scale Override ─────────────────────────────────
+        # Only shown when the detected image is a gauge
+        _res = st.session_state.analysis_result.get("result", {})
+        if "Gauge" in _res.get("method", ""):
+            _scale  = _res.get("scale", {})
+            _stage  = _res.get("scale_stage", "failed")
+            _d_min  = _scale.get("min", "Failed")
+            _d_max  = _scale.get("max", "Failed")
+
+            # Smart defaults: use detected values if valid, else 0 / 100
+            _def_min = str(_d_min) if _d_min not in ("Failed", None) else "0"
+            _def_max = str(_d_max) if _d_max not in ("Failed", None) else "100"
+
+            st.markdown("---")
+
+            # Status banner based on how the scale was detected
+            if _stage == "failed" or _d_min == "Failed" or _d_max == "Failed":
+                st.warning(
+                    "⚠️ Scale detection failed — defaulting to **Min 0 / Max 100**. "
+                    "Enter the correct values below and click **Re-analyze**."
+                )
+                _open = True
+            elif _stage == "ocr":
+                st.info(
+                    "🔍 Scale was read via EasyOCR — please verify the values are correct "
+                    "and re-analyze if needed."
+                )
+                _open = True
+            else:
+                _open = False   # gemini or manual — collapse by default
+
+            with st.expander("⚖️ Correct Gauge Scale (optional)", expanded=_open):
+                st.caption(
+                    "If the auto-detected scale min/max are wrong, enter the correct values here "
+                    "and click **Re-analyze**. Fields default to detected values (or 0/100 if detection failed)."
+                )
+                _c1, _c2, _c3 = st.columns([1, 1, 1.4])
+                with _c1:
+                    _ov_min = st.text_input(
+                        "Scale Minimum", value=_def_min,
+                        key="gauge_override_min", placeholder="e.g. 0"
+                    )
+                with _c2:
+                    _ov_max = st.text_input(
+                        "Scale Maximum", value=_def_max,
+                        key="gauge_override_max", placeholder="e.g. 100"
+                    )
+                with _c3:
+                    st.markdown("<div style='margin-top:28px;'></div>", unsafe_allow_html=True)
+                    if st.button(
+                        "🔄 Re-analyze with scale",
+                        type="primary",
+                        use_container_width=True,
+                        key="gauge_reanalyze_btn"
+                    ):
+                        if not uploaded_file:
+                            st.warning("Please keep the image file in the uploader to re-analyze.")
+                        else:
+                            with st.spinner("Re-analyzing with scale override..."):
+                                try:
+                                    from datetime import datetime as _dt
+                                    uploaded_file.seek(0)
+                                    _img = Image.open(uploaded_file)
+                                    if st.session_state.get("file_rotation", 0) != 0:
+                                        _img = _img.rotate(
+                                            -st.session_state.file_rotation * 90, expand=True
+                                        )
+                                    if _img.mode in ("RGBA", "P"):
+                                        _img = _img.convert("RGB")
+                                    _buf = io.BytesIO()
+                                    _img.save(_buf, format="JPEG")
+                                    _files = {"file": ("image.jpg", _buf.getvalue(), "image/jpeg")}
+                                    _form  = {
+                                        "force_expert":    str(force_expert),
+                                        "manual_min_val":  _ov_min.strip(),
+                                        "manual_max_val":  _ov_max.strip(),
+                                        "device_time_str": _dt.now().isoformat(),
+                                    }
+                                    _resp = requests.post(
+                                        f"{API_URL}/analyze", files=_files, data=_form
+                                    )
+                                    if _resp.status_code == 200:
+                                        st.session_state.analysis_result = _resp.json()
+                                        st.rerun()
+                                    else:
+                                        st.error(f"Server Error: {_resp.status_code}")
+                                except Exception as _e:
+                                    st.error(f"Re-analysis failed: {_e}")
+
 
 # --- PAGE 2: WEBCAM ---
 elif st.session_state.page == "webcam":

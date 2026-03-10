@@ -459,6 +459,70 @@ class HARPEngine:
         x2, y2 = min(w, x2 + pad), min(h, y2 + pad)
         return img[y1:y2, x1:x2], (x1, y1, x2, y2)
 
+    # ─────────────────────────────────────────────────────────────────────────
+    # [GAUGE XAI] Gemini Vision semantic explainer — equivalent of clock L3
+    # ─────────────────────────────────────────────────────────────────────────
+    def _explain_gauge_xai(self, crop, reading, min_val, max_val, span_deg: float, needle_deg: float) -> str:
+        """
+        Gauge-specific XAI via Gemini Vision (L3 semantic explanation equivalent).
+        Asks Gemini to describe where the needle visually points and whether the
+        computed reading is consistent with what it sees in the image.
+
+        Returns a plain-language explanation string, or a fallback on error.
+        """
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            return "Gemini XAI unavailable (missing GEMINI_API_KEY)."
+        try:
+            genai.configure(api_key=api_key)
+            pil_img = Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
+            model = genai.GenerativeModel('gemini-2.5-flash')
+            scale_info = (
+                f"Scale range: {min_val} to {max_val}"
+                if min_val is not None and max_val is not None
+                else "Scale range: unknown"
+            )
+            prompt = (
+                f"You are reviewing an analog gauge image. The automated HARP system detected:\n"
+                f"  • {scale_info}\n"
+                f"  • Total scale span: {span_deg:.1f}°\n"
+                f"  • Needle angular offset from minimum mark: {needle_deg:.1f}°\n"
+                f"  • Computed reading: {reading}\n\n"
+                f"In 2–3 concise sentences, describe where the needle visually appears to be "
+                f"pointing and whether this is consistent with the computed reading. "
+                f"Mention any visual uncertainty (glare, shadow, small tick marks) you observe."
+            )
+            response = model.generate_content([prompt, pil_img])
+            return response.text.strip()
+        except Exception as e:
+            return f"Gemini XAI error: {e}"
+
+    def _compute_gauge_confidence(self, c2_kpt_conf: float, scale_stage: str, quality_score: float):
+        """
+        Compute a real confidence score for gauge readings, replacing the hardcoded 'High'.
+
+        Weights:
+          - c2_kpt_conf  (0–1)    → 45%  C2 keypoint detection quality
+          - scale_stage  weight   → 35%  scale extraction quality
+          - image quality (0–100) → 20%  blur/brightness/contrast
+
+        Returns:
+            confidence_pct (float): 0–100
+            tier (str): 'HIGH' | 'MEDIUM' | 'LOW' | 'UNRELIABLE'
+        """
+        stage_weights = {"manual": 1.0, "gemini": 0.90, "ocr": 0.70, "failed": 0.15}
+        sw = stage_weights.get(scale_stage, 0.50)
+        score = float(
+            max(0.0, min(100.0,
+                (c2_kpt_conf * 0.45 + sw * 0.35 + (quality_score / 100.0) * 0.20) * 100.0
+            ))
+        )
+        if score >= 80:   tier = "HIGH"
+        elif score >= 55: tier = "MEDIUM"
+        elif score >= 30: tier = "LOW"
+        else:             tier = "UNRELIABLE"
+        return round(score, 1), tier
+
     def _score_quality(self, img):
         if img is None or img.size == 0: return {"blur": 0, "brightness": 0, "contrast": 0, "overall": 0}
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
@@ -643,12 +707,14 @@ class HARPEngine:
             # --- STAGE 1: MANUAL OVERRIDE ---
             min_val, max_val = None, None
             override_active = False
+            scale_stage = "failed"  # tracks which extraction stage succeeded
             
             if manual_min_val and manual_max_val:
                 try:
                     min_val = float(manual_min_val)
                     max_val = float(manual_max_val)
                     override_active = True
+                    scale_stage = "manual"
                     debug_info.append(f"Stage 1 (Manual Override): Min={min_val}, Max={max_val}")
                 except Exception as e:
                     debug_info.append(f"Stage 1 (Manual Override) Failed to parse: {e}")
@@ -660,6 +726,7 @@ class HARPEngine:
                 if err_str:
                     debug_info.append(f"Stage 2 (Gemini API) Failed: {err_str}")
                 elif min_val is not None and max_val is not None:
+                    scale_stage = "gemini"
                     debug_info.append(f"Stage 2 (Gemini API): Min={min_val}, Max={max_val}")
             
             # --- STAGE 3: LOCAL FALLBACK (INWARD SHIFT OCR) ---
@@ -669,10 +736,13 @@ class HARPEngine:
                 max_roi = self._get_roi_inward(target_crop, center, max_pt)
                 min_val = self._extract_number(min_roi)
                 max_val = self._extract_number(max_roi)
+                if min_val is not None and max_val is not None:
+                    scale_stage = "ocr"
                 debug_info.append(f"Stage 3 (Local API Fallback): Min={min_val}, Max={max_val}")
             
             parsed_min = min_val if min_val is not None else "Failed"
             parsed_max = max_val if max_val is not None else "Failed"
+            debug_info.append(f"Scale Extraction Stage: {scale_stage}")
             
             a_min = self._get_angle(center, min_pt)
             a_max = self._get_angle(center, max_pt)
@@ -688,6 +758,8 @@ class HARPEngine:
                 method_str = "Advanced Gauge Reading (C1+C2+OCR+C4)"
                 reasoning_str = f"Gauge Logic: 1° = {units_per_deg:.4f} units. Formula: {min_val} + ({needle:.1f}° * {units_per_deg:.4f}) = {reading}"
             else:
+                if min_val is not None and max_val is not None and min_val > max_val:
+                    debug_info.append(f"Scale Reversed: min={min_val} > max={max_val}. Falling back to raw percentage.")
                 reading = calculate_gauge_reading([center, min_pt, max_pt, tip])
                 time_str = f"{reading}%"
                 method_str = "Gauge Reading - Fallback (C1+C2+C4)"
@@ -715,15 +787,37 @@ class HARPEngine:
                 c2_research_data = None
                 debug_info.append(f"C2 Research Error: {e}")
 
+            # --- [T1] REAL CONFIDENCE SCORE (replaces hardcoded 'High') ---
+            gauge_conf_score, gauge_conf_tier = self._compute_gauge_confidence(
+                c2_kpt_conf=c2_gauge_conf,
+                scale_stage=scale_stage,
+                quality_score=quality.get("overall", 0)
+            )
+            gauge_confidence = {"score": gauge_conf_score, "tier": gauge_conf_tier}
+            debug_info.append(f"Gauge Confidence: {gauge_conf_tier} ({gauge_conf_score:.1f}/100) — stage={scale_stage}, kpt_conf={c2_gauge_conf:.3f}")
+
+            # --- [T1] GAUGE XAI — Gemini Vision explanation (Force Expert Path only) ---
+            gauge_xai_text = ""
+            if force_expert:
+                debug_info.append("Gauge XAI: Requesting Gemini Vision explanation...")
+                try:
+                    gauge_xai_text = self._explain_gauge_xai(
+                        target_crop, time_str, min_val, max_val, span, needle
+                    )
+                    debug_info.append(f"Gauge XAI: {gauge_xai_text[:80]}..." if len(gauge_xai_text) > 80 else f"Gauge XAI: {gauge_xai_text}")
+                except Exception as e:
+                    debug_info.append(f"Gauge XAI Error: {e}")
+
             return {
                 "time": time_str,
                 "method": method_str,
-                "confidence": "High",
+                "confidence": f"{gauge_conf_score:.1f}%",
                 "heatmap": None,
                 "debug": debug_info + [f"Final Reading: {time_str}"],
                 "visualizations": visualizations,
                 "angles": {"span": span, "needle": needle, "units_per_deg": units_per_deg},
                 "scale": {"min": parsed_min, "max": parsed_max},
+                "scale_stage": scale_stage,
                 "reasoning": reasoning_str,
                 "error": "",
                 "c1_conf": float(conf),
@@ -732,7 +826,10 @@ class HARPEngine:
                 "c1_gauge_conf": float(g_conf) if g_conf != -1.0 else 0.0,
                 "c1_clock_quality": c_quality,
                 "c1_gauge_quality": g_quality,
-                "c2_research": c2_research_data
+                "c2_research": c2_research_data,
+                "gauge_confidence": gauge_confidence,
+                "keypoint_confidence": round(float(c2_gauge_conf), 4),
+                "gauge_xai": gauge_xai_text,
             }
 
         # ==========================================
