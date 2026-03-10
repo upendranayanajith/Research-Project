@@ -21,6 +21,7 @@ parent_dir = os.path.abspath(os.path.join(current_dir, ".."))
 if parent_dir not in sys.path:
     sys.path.append(parent_dir)
 
+# frontend.py
 from app.c1_ui import render_c1_localization
 
 # Configuration
@@ -128,6 +129,51 @@ class ClockProcessor(VideoProcessorBase):
 def display_results(data):
     res = data["result"]
     viz = data.get("visualizations", {})
+    
+    # --- NEW: Handle Quality/Confidence Gate Results ---
+    if res.get("skipped"):
+        skip_reason = res.get("skip_reason", "unknown")
+        
+        if skip_reason == "quality":
+            st.markdown(f"#### {icon('shield', color='orange')} Quality Gate Activated", unsafe_allow_html=True)
+            st.warning(f"**The image was blocked by the Quality Gate.** This feature prevents unreliable readings from degraded images.")
+            st.error(f"**Reason:** {res.get('error', 'Image quality too low')}")
+            
+            # Show quality breakdown
+            q = res.get("c1_quality", {})
+            if q:
+                st.markdown("##### Quality Breakdown")
+                overall = int(q.get("overall", 0))
+                st.progress(max(0, overall) / 100.0, text=f"Overall Quality: {overall}/100 (Minimum: 40)")
+                
+                col_s, col_b, col_c = st.columns(3)
+                blur_perc = min(q.get('blur', 0) / 500.0, 1.0)
+                bright_perc = max(0.0, 1.0 - (abs(q.get('brightness', 127) - 127) / 127.0))
+                cont_perc = min(q.get('contrast', 0) / 60.0, 1.0)
+                with col_s:
+                    st.markdown("<span style='color:white; font-size:16px;'>Sharpness</span>", unsafe_allow_html=True)
+                    st.progress(blur_perc, text=f"{int(blur_perc*100)}% {'Clear' if blur_perc > 0.5 else 'Blurry'}")
+                with col_b:
+                    st.markdown("<span style='color:white; font-size:16px;'>Brightness</span>", unsafe_allow_html=True)
+                    st.progress(bright_perc, text=f"{int(bright_perc*100)}% {'Good' if bright_perc > 0.5 else 'Dark'}")
+                with col_c:
+                    st.markdown("<span style='color:white; font-size:16px;'>Contrast</span>", unsafe_allow_html=True)
+                    st.progress(cont_perc, text=f"{int(cont_perc*100)}% {'High' if cont_perc > 0.5 else 'Low'}")
+            
+            st.info("💡 **Tip:** Try uploading a clearer, well-lit image. This gate ensures only reliable readings reach the pipeline.")
+            return
+
+        elif skip_reason == "confidence":
+            st.markdown(f"#### {icon('shield', color='red')} Confidence Floor Activated", unsafe_allow_html=True)
+            st.warning(f"**The image was blocked by the C1 Confidence Floor.** The AI model is not confident enough that it found a valid clock or gauge.")
+            st.error(f"**Reason:** {res.get('error', 'Detection confidence too low')}")
+            
+            c1_conf = res.get("c1_conf", 0)
+            st.markdown("##### Detection Confidence")
+            st.progress(max(0.0, min(1.0, c1_conf)), text=f"C1 Confidence: {c1_conf*100:.1f}% (Minimum: 45%)")
+            
+            st.info("💡 **Tip:** Ensure the clock or gauge is clearly visible, centered, and well-lit in the image.")
+            return
     
     if "error" in res and res["error"]:
         st.markdown(f"#### {icon('error', color='red')} Analysis Failed", unsafe_allow_html=True)
@@ -640,7 +686,7 @@ if st.session_state.page == "analysis":
 # --- PAGE 2: WEBCAM ---
 elif st.session_state.page == "webcam":
     st.markdown(f"## {icon('videocam')} Real-Time Analysis", unsafe_allow_html=True)
-    st.info("Running C1 (Localization) + C2 (Pose) locally. Processes every 5th frame.")
+    st.info("Running C1 (Localization) + C2 (Pose) locally. IP Camera mode includes adaptive frame sampling, quality gates, and temporal smoothing.")
     
     # Camera Source Selection
     cam_source = st.radio("Select Camera Source", ["Local Webcam", "IP Camera (RTSP)"], horizontal=True)
@@ -739,6 +785,66 @@ elif st.session_state.page == "webcam":
             stream.stop()
             del st.session_state.cam_stream
         else:
+            # --- Import CCTV enhancement modules ---
+            from app.core.temporal_smoothing import (
+                init_smoothing_state, process_frame_with_smoothing
+            )
+            from app.core.adaptive_interval import (
+                AdaptiveFrameIntervalController, FPSEstimator
+            )
+
+            # --- Initialize state (once per stream session) ---
+            if "smoothing_state" not in st.session_state:
+                st.session_state.smoothing_state = init_smoothing_state()
+            if "adaptive_ctrl" not in st.session_state:
+                st.session_state.adaptive_ctrl = AdaptiveFrameIntervalController(target_hz=2.0)
+            if "fps_est" not in st.session_state:
+                st.session_state.fps_est = FPSEstimator(window=30)
+
+            smoothing_state = st.session_state.smoothing_state
+            controller = st.session_state.adaptive_ctrl
+            fps_est = st.session_state.fps_est
+
+            # --- Sidebar: Adaptive Interval Controls ---
+            with st.sidebar:
+                st.markdown("---")
+                st.caption("⚡ Frame Sampling")
+                manual_mode = st.checkbox("Manual interval override", value=False,
+                                           key="cctv_manual_mode")
+                if manual_mode:
+                    manual_val = st.slider("Analyze every N frames",
+                                            min_value=1, max_value=30,
+                                            value=controller.current_interval,
+                                            key="cctv_manual_interval")
+                    controller.current_interval = manual_val
+                else:
+                    status = controller.status_dict()
+                    st.info(
+                        f"Auto: every **{status['current_interval']}** frames  \n"
+                        f"~{status['effective_hz']:.1f} analyses/sec"
+                    )
+                    new_target = st.slider("Target analyses/sec",
+                                            min_value=0.5, max_value=10.0,
+                                            value=controller.target_hz, step=0.5,
+                                            key="cctv_target_hz")
+                    if new_target != controller.target_hz:
+                        controller.target_hz = new_target
+                        controller._recalculate()
+
+            # --- Sidebar: Smoothing Stats ---
+            with st.sidebar:
+                st.markdown("---")
+                st.caption("📊 Temporal Smoothing")
+                buf_len = len(smoothing_state["reading_buffer"])
+                st.progress(buf_len / 5, text=f"Buffer: {buf_len}/5 frames")
+                sm_c1, sm_c2 = st.columns(2)
+                sm_c1.metric("Analyzed", smoothing_state["total_analyzed"])
+                sm_c2.metric("Skipped", smoothing_state["total_skipped"])
+
+            # --- Alert placeholder below video feed ---
+            alert_placeholder = st.empty()
+            metrics_placeholder = st.empty()
+
             frame_count = 0
             last_time = time.time()
             last_ui_update_time = time.time()
@@ -747,9 +853,6 @@ elif st.session_state.page == "webcam":
             
             # Target ~15 FPS for the frontend UI to prevent Streamlit websocket lag
             UI_UPDATE_INTERVAL = 1.0 / 15.0 
-            
-            # Analyze interval (e.g. 5 means AI runs roughly ~5-6 times a second assuming UI loop runs at 30 FPS)
-            ANALYZE_INTERVAL = 5
             
             while start_ip_cam:  # Use the checkbox state from UI to control the loop
                 # Instantly grab latest frame from background thread (no blocking!)
@@ -761,6 +864,7 @@ elif st.session_state.page == "webcam":
                     continue
                     
                 frame_count += 1
+                fps_est.tick()
                 now = time.time()
                 
                 # FPS Calculation
@@ -769,37 +873,92 @@ elif st.session_state.page == "webcam":
                     frame_count = 0
                     last_time = now
                     
-                # 1. AI Inference
-                if frame_count % ANALYZE_INTERVAL == 0:
+                # 1. AI Inference (using adaptive interval)
+                if frame_count % controller.current_interval == 0:
                     try:
-                        # Optional: resize frame before inference to save CPU if it's huge (e.g. 4k)
-                        # small_frame = cv2.resize(frame, (640, 480)) 
-                        # We must copy the frame because Streamlit/AI shouldn't modify the thread's raw array directly
-                        frame_for_ai = frame.copy() 
-                        last_result = st.session_state.ip_cam_engine.analyze(
-                            frame_for_ai, 
+                        frame_for_ai = frame.copy()
+                        t0 = time.perf_counter()
+
+                        last_result, stable_display = process_frame_with_smoothing(
+                            frame_for_ai,
+                            st.session_state.ip_cam_engine,
+                            smoothing_state,
+                            detected_type_hint='clock',
+                            votes_needed=3,
                             force_expert=st.session_state.ip_cam_expert,
                             manual_min_val=st.session_state.ip_cam_manual_min,
                             manual_max_val=st.session_state.ip_cam_manual_max
                         )
+
+                        # Update adaptive controller with real measurements
+                        controller.update(
+                            inference_duration_sec=time.perf_counter() - t0,
+                            camera_fps=fps_est.fps
+                        )
+
+                        # Update alert banner
+                        with alert_placeholder:
+                            q = smoothing_state.get("last_quality", {})
+                            overall = q.get("overall", 0) if q else 0
+                            if last_result and last_result.get("skipped"):
+                                reason = smoothing_state.get("last_skip_reason", "unknown")
+                                st.error(
+                                    f"⛔ **FRAME SKIPPED** — {reason} | "
+                                    f"Score: {overall:.0f}/100 | "
+                                    f"Holding: **{smoothing_state['display_reading']}**"
+                                )
+                            elif overall < 60:
+                                st.warning(
+                                    f"⚠️ Low Quality — Score: {overall:.0f}/100 | "
+                                    f"Reading: **{smoothing_state['display_reading']}**"
+                                )
+                            else:
+                                st.success(
+                                    f"✅ Quality PASS — Score: {overall:.0f}/100 | "
+                                    f"Stable: **{smoothing_state['display_reading']}** "
+                                    f"({smoothing_state['display_votes']}/5 votes)"
+                                )
+
+                        # Update metrics bar
+                        with metrics_placeholder.container():
+                            mc1, mc2, mc3, mc4 = st.columns(4)
+                            mc1.metric("Stable Reading", smoothing_state["display_reading"])
+                            mc2.metric("Votes", f"{smoothing_state['display_votes']}/5")
+                            mc3.metric("C1 Conf", f"{last_result.get('c1_conf', 0):.2f}" if last_result else "—")
+                            mc4.metric("Frame Skip", f"1/{controller.current_interval}")
+
                     except Exception as e:
                         print(f"AI Error: {e}")
                         
-                # 2. Draw Overlays (We draw instantly on the copied frame before rendering)
+                # 2. Draw Overlays
                 display_frame = frame.copy()
-                if last_result:
-                    res = last_result
-                    display_val = res.get('time', '--')
-                    cv2.putText(display_frame, f"READING: {display_val}", (50, 100), cv2.FONT_HERSHEY_DUPLEX, 1.2, (0, 255, 0), 3)
-                    
-                    method = res.get('method', 'Unknown')
-                    color = (0, 255, 0) if "Fast" in method or "Gauge" in method else (0, 0, 255)
-                    cv2.putText(display_frame, f"Mode: {method}", (50, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
-                    
-                    if "angles" in res and res["angles"].get("hand1", 0) != 0.0:
-                        a1 = res["angles"].get("hand1", 0)
-                        a2 = res["angles"].get("hand2", 0)
-                        cv2.putText(display_frame, f"H:{a1:.0f} M:{a2:.0f}", (50, 190), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+
+                # Draw the stable reading from smoothing buffer
+                h_f, w_f = display_frame.shape[:2]
+                stable_text = smoothing_state["display_reading"]
+                votes = smoothing_state["display_votes"]
+
+                # Background box
+                is_skipped = last_result.get("skipped", False) if last_result else False
+                box_color = (0, 140, 255) if is_skipped else (0, 255, 0)
+                cv2.rectangle(display_frame, (10, h_f - 90), (400, h_f - 10), (0, 0, 0), cv2.FILLED)
+                cv2.rectangle(display_frame, (10, h_f - 90), (400, h_f - 10), box_color, 2)
+
+                # Large reading text
+                cv2.putText(display_frame, stable_text,
+                            (20, h_f - 45), cv2.FONT_HERSHEY_SIMPLEX, 1.4, box_color, 3, cv2.LINE_AA)
+
+                # Vote count
+                vote_label = (f"Stable: {votes}/5 votes" if not is_skipped
+                              else f"SKIPPED | Holding: {stable_text}")
+                cv2.putText(display_frame, vote_label,
+                            (20, h_f - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.45, box_color, 1, cv2.LINE_AA)
+
+                # Method overlay (if available from last valid result)
+                if last_result and not last_result.get("skipped"):
+                    method = last_result.get('method', 'Unknown')
+                    m_color = (0, 255, 0) if "Fast" in method or "Gauge" in method else (0, 0, 255)
+                    cv2.putText(display_frame, f"Mode: {method}", (50, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.7, m_color, 2)
 
                 cv2.putText(display_frame, f"Pipeline FPS: {fps}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
                 
@@ -812,6 +971,7 @@ elif st.session_state.page == "webcam":
                     
                 # Sleep briefly to free CPU for the background reading thread if needed
                 time.sleep(0.01)
+
 
 # --- PAGE 3: BATCH ---
 elif st.session_state.page == "batch":
