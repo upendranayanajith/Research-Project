@@ -27,6 +27,22 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # Initialize Engine
 engine = HARPEngine(BASE_DIR)
 
+def sanitize_result(obj):
+    """Recursively convert numpy types to Python types for JSON serialization."""
+    if isinstance(obj, dict):
+        return {k: sanitize_result(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [sanitize_result(v) for v in obj]
+    elif isinstance(obj, np.ndarray):
+        return None # Should have been handled/encoded already
+    elif isinstance(obj, (np.float32, np.float64, np.float16)):
+        return float(obj)
+    elif isinstance(obj, (np.int32, np.int64, np.int8, np.int16, np.uint8, np.uint16, np.uint32)):
+        return int(obj)
+    elif isinstance(obj, np.bool_):
+        return bool(obj)
+    return obj
+
 # --- [C4] MAIN ANALYSIS ENDPOINT ---
 @app.post("/analyze")
 async def analyze_image(
@@ -64,10 +80,7 @@ async def analyze_image(
     # [C4] Log to Database
     metrics_tracker.record_analysis(result, processing_time, file.filename)
     
-    if "error" in result and result["error"]:
-        return {"result": result, "processing_time": processing_time}
-    
-    # [C4] Process Visualizations for API Response
+    # [C4] Process Visualizations for API Response (Must happen before return to prevent 500 error)
     viz_base64 = {}
     if "visualizations" in result:
         for stage_name, stage_val in result["visualizations"].items():
@@ -85,24 +98,46 @@ async def analyze_image(
                 _, buffer = cv2.imencode('.jpg', stage_val)
                 viz_base64[stage_name] = base64.b64encode(buffer).decode('utf-8')
 
-        # Remove raw arrays from result to make it JSON serializable
+        # Remove raw arrays from result
         result.pop("visualizations", None)
     
     # Handle Heatmap (C3 XAI)
     heatmap_b64 = None
     if result.get("heatmap") is not None:
-        # Normalize 0-1 float to 0-255 uint8
-        heatmap_uint8 = (result["heatmap"] * 255).astype(np.uint8)
-        _, buffer = cv2.imencode('.jpg', heatmap_uint8)
-        heatmap_b64 = base64.b64encode(buffer).decode('utf-8')
-        result["heatmap"] = None
+        if isinstance(result["heatmap"], np.ndarray):
+            heatmap_uint8 = (result["heatmap"] * 255).astype(np.uint8)
+            _, buffer = cv2.imencode('.jpg', heatmap_uint8)
+            heatmap_b64 = base64.b64encode(buffer).decode('utf-8')
+        result.pop("heatmap", None) # Always remove raw array/none
+    
+    # 3. Final Sanitization (Deep convert numpy types to python types)
+    clean_result = sanitize_result(result)
     
     return {
-        "result": result,
+        "result": clean_result,
         "visualizations": viz_base64,
         "heatmap_b64": heatmap_b64,
         "processing_time": processing_time
     }
+
+# --- [C1] IDENTIFICATION ENDPOINT ---
+@app.post("/identify")
+async def identify_type(file: UploadFile = File(...)):
+    contents = await file.read()
+    nparr = np.frombuffer(contents, np.uint8)
+    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    
+    if img is None:
+        return {"type": "none", "error": "Invalid image"}
+        
+    # Reuse engine localization
+    c_crop, c_bbox, c_conf, g_crop, g_bbox, g_conf = engine._localize_all(img)
+    
+    if c_conf == -1.0 and g_conf == -1.0:
+        return {"type": "none"}
+        
+    return {"type": "clock" if c_conf > g_conf else "gauge"}
+
 
 # --- COMPARATOR ENDPOINT ---
 @app.post("/compare_times")

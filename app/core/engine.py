@@ -374,14 +374,14 @@ class HARPEngine:
             visualizations['c1_detection'] = self._resize_small(img_array.copy())
             return {
                 "time": "N/A", 
-                "method": f"No Object Detected",
+                "method": f"no clock face or gauge in the uploaded image",
                 "confidence": "0.0",
                 "heatmap": None,
                 "debug": debug_info,
                 "visualizations": visualizations,
                 "angles": {"hand1": 0.0, "hand2": 0.0},
                 "reasoning": f"No valid clock or gauge detected.",
-                "error": f"No Object Detected"
+                "error": f"no clock face or gauge in the uploaded image"
             }
 
         c1_detected_type = 'clock' if c_conf > g_conf else 'gauge'
@@ -409,7 +409,7 @@ class HARPEngine:
                     gauge_kpts = kpts
 
         if c2_clock_conf == 0.0 and c2_gauge_conf == 0.0:
-             return {"error": "C2 Failed: Neither clock hands nor gauge skeleton found in the crop."}
+             return {"error": "no clock face or gauge in the uploaded image (C2 verification failed)"}
              
         # The true type is whichever C2 model is more confident about its keypoints
         detected_type = 'clock' if c2_clock_conf > c2_gauge_conf else 'gauge'

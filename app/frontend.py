@@ -266,18 +266,7 @@ if st.session_state.page == "analysis":
     manual_min, manual_max = "", ""
     
     if uploaded_file:
-        if "identified_type" not in st.session_state or st.session_state.get("last_uploaded") != uploaded_file.name:
-            with st.spinner("Detecting image type..."):
-                try:
-                    files = {"file": ("image.jpg", uploaded_file.getvalue(), "image/jpeg")}
-                    response = requests.post(f"{API_URL}/identify", files=files)
-                    if response.status_code == 200:
-                        st.session_state.identified_type = response.json().get("type", "none")
-                    else:
-                        st.session_state.identified_type = "none"
-                    st.session_state.last_uploaded = uploaded_file.name
-                except Exception as e:
-                    st.session_state.identified_type = "none"
+        pass # Identification is now handled server-side during analysis.
                     
         # if st.session_state.get("identified_type") == "gauge":
         #     st.markdown(f"#### {icon('edit')} Manual Gauge Scale Overrides", unsafe_allow_html=True)
