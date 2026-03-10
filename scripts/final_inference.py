@@ -48,15 +48,20 @@ def main():
         angle_A = calculate_angle(center, p1)
         angle_B = calculate_angle(center, p2)
         
+        len_A = math.hypot(center[0]-p1[0], center[1]-p1[1])
+        len_B = math.hypot(center[0]-p2[0], center[1]-p2[1])
+        
         # --- C4: COGNITIVE REASONING ---
         # "Here are two lines. Which time physically matches them?"
-        h, m, score = physics_engine.solve_time(angle_A, angle_B)
+        h, m, error, conf, cands, telemetry_log = physics_engine.solve_time(angle_A, angle_B, length1=len_A, length2=len_B)
         time_str = f"{h}:{m:02d}"
+        print(f"[{img_name}] {time_str} - {telemetry_log}")
         
         # --- VISUALIZATION ---
         display_img = img.copy()
         cv2.putText(display_img, f"{time_str}", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 255, 0), 3)
-        cv2.putText(display_img, f"Conf: {score:.1f}", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+        cv2.putText(display_img, f"Conf: {conf:.1f}%", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+        cv2.putText(display_img, f"Len A:{len_A:.0f}px Len B:{len_B:.0f}px", (10, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
         
         # Draw Skeleton
         cv2.circle(display_img, (int(center[0]), int(center[1])), 6, (0, 0, 255), -1)
