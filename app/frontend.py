@@ -142,8 +142,8 @@ def display_results(data):
     
     type_identified = "Gauge" if "Gauge" in res["method"] else "Clock"
     
-    st.markdown(f"**Identified Type:** <span style='color:blue'>{icon('visibility')} {type_identified}</span>", unsafe_allow_html=True)
-    st.markdown(f"**Method Used:** <span style='color:{method_color}'>{icon(method_icon, size=20)} {res['method']}</span>", unsafe_allow_html=True)
+    st.markdown(f"**Identified Type:** <span style='color:white; font-size:24px'> {type_identified}</span>", unsafe_allow_html=True)
+    st.markdown(f"**Method Used:** <span style='color:{method_color}; font-size:22px'>{icon(method_icon, size=20)} {res['method']}</span>", unsafe_allow_html=True)
     
     stages = [
         ("C1 Localization", "crop_free", ["C1", "C2", "C4"]),
@@ -266,13 +266,47 @@ if st.session_state.page == "analysis":
     manual_min, manual_max = "", ""
     
     if uploaded_file:
-        pass # Identification is now handled server-side during analysis.
-                    
-        # if st.session_state.get("identified_type") == "gauge":
-        #     st.markdown(f"#### {icon('edit')} Manual Gauge Scale Overrides", unsafe_allow_html=True)
-        #     colA, colB = st.columns(2)
-        #     manual_min = colA.text_input("Min Value (Optional)", "")
-        #     manual_max = colB.text_input("Max Value (Optional)", "")
+        if "file_rotation" not in st.session_state:
+            st.session_state.file_rotation = 0
+            st.session_state.last_file_id = ""
+
+        # Reset rotation and clear previous results if a new file is uploaded
+        if st.session_state.last_file_id != uploaded_file.name:
+            st.session_state.file_rotation = 0
+            st.session_state.last_file_id = uploaded_file.name
+            if "analysis_result" in st.session_state:
+                del st.session_state.analysis_result
+
+        # Main layout: Image (Left) | Controls (Right)
+        col_img, col_ctrl = st.columns([2, 1])
+        
+        with col_img:
+            try:
+                image_preview = Image.open(uploaded_file)
+                if st.session_state.file_rotation != 0:
+                    image_preview = image_preview.rotate(-st.session_state.file_rotation * 90, expand=True)
+                st.image(image_preview, caption=f"Oriented Preview ({st.session_state.file_rotation * 90}°)", width=320)
+            except Exception as e:
+                st.error(f"Preview Error: {e}")
+
+        with col_ctrl:
+            st.markdown(f"##### {icon('crop_rotate')} Rotate Image", unsafe_allow_html=True)
+            
+            # Left and Right buttons in one line
+            sub_col1, sub_col2 = st.columns(2)
+            if sub_col1.button("Left", key="btn_rot_l", use_container_width=True):
+                st.session_state.file_rotation = (st.session_state.file_rotation - 1) % 4
+                st.rerun()
+            if sub_col2.button("Right", key="btn_rot_r", use_container_width=True):
+                st.session_state.file_rotation = (st.session_state.file_rotation + 1) % 4
+                st.rerun()
+            
+            # Reset button on a new line below them
+            if st.button("Reset to 0°", key="btn_rot_reset", use_container_width=True):
+                st.session_state.file_rotation = 0
+                st.rerun()
+
+    manual_min, manual_max = "", ""
 
     if uploaded_file and st.button("Run Analysis", type="primary"):
         with st.spinner("Processing..."):
@@ -281,8 +315,17 @@ if st.session_state.page == "analysis":
                 device_time_str = datetime.now().isoformat()
                 
                 image = Image.open(uploaded_file)
+                
+                # Apply Component 1 Rotation if set
+                if st.session_state.get("file_rotation", 0) != 0:
+                    image = image.rotate(-st.session_state.file_rotation * 90, expand=True)
+                
+                # Convert to RGB if necessary for JPEG (handles RGBA/PNG transparency)
+                if image.mode in ("RGBA", "P"):
+                    image = image.convert("RGB")
+                    
                 img_byte_arr = io.BytesIO()
-                image.save(img_byte_arr, format=image.format)
+                image.save(img_byte_arr, format="JPEG")
                 files = {"file": ("image.jpg", img_byte_arr.getvalue(), "image/jpeg")}
                 data_form = {
                     "force_expert": str(force_expert),
@@ -291,9 +334,18 @@ if st.session_state.page == "analysis":
                     "device_time_str": device_time_str
                 }
                 response = requests.post(f"{API_URL}/analyze", files=files, data=data_form)
-                if response.status_code == 200: display_results(response.json())
-                else: st.error(f"Server Error: {response.status_code}")
-            except Exception as e: st.error(f"Connection Failed: {e}")
+                if response.status_code == 200: 
+                    st.session_state.analysis_result = response.json()
+                else: 
+                    st.error(f"Server Error: {response.status_code}")
+                    if "analysis_result" in st.session_state: del st.session_state.analysis_result
+            except Exception as e: 
+                st.error(f"Connection Failed: {e}")
+                if "analysis_result" in st.session_state: del st.session_state.analysis_result
+
+    # Display results if they exist in session state
+    if "analysis_result" in st.session_state:
+        display_results(st.session_state.analysis_result)
 
 # --- PAGE 2: WEBCAM ---
 elif st.session_state.page == "webcam":

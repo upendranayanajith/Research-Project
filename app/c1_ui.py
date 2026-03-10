@@ -48,13 +48,13 @@ def render_c1_localization(viz, res):
             
             st.markdown(f"**Detection Probability:** {conf_display:.1f}%")
             if conf_display >= 80:
-                st.progress(conf_perc, text=f"High Confidence ({conf_display:.1f}%)")
+                st.progress(conf_perc, text=f"High Confidence ")
                 st.success("Target clearly identified. The model is highly confident this is a valid reading target.")
             elif conf_display >= 50:
-                st.progress(conf_perc, text=f"Moderate Confidence ({conf_display:.1f}%)")
+                st.progress(conf_perc, text=f"Medium Confidence ")
                 st.warning("Target found, but the model is somewhat unsure. Check for distortion, glare, or partial occlusion.")
             else:
-                st.progress(max(0.0, conf_perc), text=f"Low Confidence ({conf_display:.1f}%)")
+                st.progress(max(0.0, conf_perc), text=f"Low Confidence ")
                 st.error("Target identification is poor. The image may not contain a valid gauge or clock face.")
         else:
             st.info("No confidence data available.")
