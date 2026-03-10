@@ -348,7 +348,25 @@ def display_results(data):
                 st.image(base64.b64decode(viz["c2_skeleton"]), caption="YOLO-Pose Skeleton", width=400)
             else:
                 st.info("No skeleton data available.")
-        
+
+            # F7: For gauge images, surface scale extraction stage inline
+            if "Gauge" in res.get("method", ""):
+                _stg   = res.get("scale_stage", "failed")
+                _scale = res.get("scale", {})
+                _clr_map = {"manual": "#22c55e", "gemini": "#a78bfa", "ocr": "#38bdf8", "failed": "#ef4444"}
+                _lbl_map = {"manual": "✏️ Manual Override", "gemini": "✨ Gemini Vision", "ocr": "🔍 EasyOCR", "failed": "❌ All stages failed"}
+                _clr = _clr_map.get(_stg, "#94a3b8")
+                _lbl = _lbl_map.get(_stg, _stg)
+                st.markdown(
+                    f"<div style='margin-top:12px;padding:10px 16px;background:#0f0f1a;"
+                    f"border:1px solid {_clr}44;border-radius:8px;'>"
+                    f"<span style='color:{_clr};font-weight:700;font-size:12px;'>Scale Extraction — {_lbl}</span>"
+                    f"<div style='color:#94a3b8;font-size:12px;margin-top:4px;'>"
+                    f"Min: <b>{_scale.get('min', '?')}</b> &nbsp;•&nbsp; Max: <b>{_scale.get('max', '?')}</b>"
+                    f"</div></div>",
+                    unsafe_allow_html=True
+                )
+
         # ── SUB-TAB 2: Scale Analysis (GAP 3) ──
         with sub2:
             if c2r and "scale_analysis" in c2r:
@@ -1244,7 +1262,16 @@ if st.session_state.page == "analysis":
     st.markdown(f"#### {icon('settings')} Configuration", unsafe_allow_html=True)
     
     force_expert = st.checkbox("Force Expert Path (Activate C3 + XAI)", value=False)
-    
+    # F6: Show a gauge-specific hint when the last result was a gauge
+    _last = st.session_state.get("analysis_result") or {}
+    _last_res = _last.get("result", {}) if isinstance(_last, dict) else {}
+    if "Gauge" in _last_res.get("method", ""):
+        st.caption(
+            "ℹ️ **Gauge mode:** Force Expert Path triggers a "
+            "**Gemini Vision XAI explanation** of the needle position — "
+            "C3 ResNet is not used for gauges."
+        )
+
     manual_min, manual_max = "", ""
     
     if uploaded_file:

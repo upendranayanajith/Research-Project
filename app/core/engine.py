@@ -80,8 +80,9 @@ class HARPEngine:
             self.contrastive_xai = ContrastiveExplainer()                   # L5  "Why not?"
             self.lime_explainer  = LimeExplainer()                          # L6  superpixel
             self.shap_explainer  = ShapExplainer()                          # L7  attribution
-            self._c3_kalman: list[dict | None] = [None, None]              # per-hand Kalman
-            self._uncertainty_temperature: float = 1.0                     # temp scaling T
+            self._c3_kalman: list[dict | None] = [None, None]    # per-hand Kalman (clock)
+            self._gauge_kalman: dict | None = None                # [T8] gauge needle Kalman
+            self._uncertainty_temperature: float = 1.0            # temp scaling T
             print("✅ XAI Stack loaded:")
             print(f"   L1  GradCAM++ (multi-layer): {'✅' if self.xai.available else '⚠️ unavailable'}")
             print("   L1.5 Integrated Gradients (50 steps): ✅")
@@ -380,32 +381,58 @@ class HARPEngine:
         elif diff > 0: return f"Fast by {abs(diff)} minutes"
         else: return f"Slow by {abs(diff)} minutes"
 
-    def _extract_gauge_scale_gemini(self, img):
+    def _extract_gauge_scale_gemini(self, img, min_roi=None, max_roi=None):
+        """
+        T5: Accept optional pre-cropped ROIs near the min/max keypoints.
+        When ROIs are supplied, stitch them and ask Gemini which label is min and which is max,
+        giving much tighter focus than the full gauge crop.
+        Falls back to full-crop prompt when ROIs are unavailable.
+        """
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
             return None, None, "Missing GEMINI_API_KEY in .env"
-            
+
         genai.configure(api_key=api_key)
-        pil_img = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
         model = genai.GenerativeModel('gemini-2.5-flash')
-        
-        prompt = "Look at this analog gauge. Return ONLY the minimum scale reading and the maximum scale reading printed on it, separated by a comma. Do not include units or any other text. For example: 0, 100 or -10, 50."
-        
+
         try:
+            if min_roi is not None and max_roi is not None:
+                # --- [T5] ROI-targeted prompt ---
+                # Resize both patches to same height for side-by-side stitch
+                h = max(min_roi.shape[0], max_roi.shape[1], 80)
+                min_patch = cv2.resize(min_roi, (h, h))
+                max_patch = cv2.resize(max_roi, (h, h))
+                stitched = np.hstack([min_patch, max_patch])
+                pil_img = Image.fromarray(cv2.cvtColor(stitched, cv2.COLOR_BGR2RGB))
+                prompt = (
+                    "This image shows two small patches from an analog gauge: "
+                    "LEFT patch is near the scale minimum mark, RIGHT patch is near the scale maximum mark. "
+                    "Read the numeric value from EACH patch and return them as: <left_value>, <right_value>. "
+                    "Return ONLY two numbers separated by a comma. Do not include units or other text."
+                )
+            else:
+                # --- Fallback: full-crop prompt ---
+                pil_img = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+                prompt = (
+                    "Look at this analog gauge. Return ONLY the minimum scale reading and the maximum "
+                    "scale reading printed on it, separated by a comma. "
+                    "Do not include units or any other text. For example: 0, 100 or -10, 50."
+                )
+
             response = model.generate_content([prompt, pil_img])
             text = response.text.strip()
-            
+
             parts = [p.strip() for p in text.split(',')]
             if len(parts) >= 2:
                 min_match = re.findall(r"[-+]?\d*\.\d+|\d+", parts[0])
                 max_match = re.findall(r"[-+]?\d*\.\d+|\d+", parts[1])
-                
                 min_val = float(min_match[0]) if min_match else None
                 max_val = float(max_match[0]) if max_match else None
                 return min_val, max_val, None
             return None, None, f"Could not parse format: {text}"
         except Exception as e:
             return None, None, str(e)
+
 
     def _get_roi_inward(self, img, center_pt, target_pt, patch_size=60, shift_pixels=25):
         """Calculates a vector from target_pt toward center_pt, and shifts the crop box inward."""
@@ -719,10 +746,15 @@ class HARPEngine:
                 except Exception as e:
                     debug_info.append(f"Stage 1 (Manual Override) Failed to parse: {e}")
 
-            # --- STAGE 2: GEMINI API ---
+            # --- STAGE 2: GEMINI API (T5: pass ROI crops for targeted reading) ---
             err_str = None
             if not override_active:
-                min_val, max_val, err_str = self._extract_gauge_scale_gemini(target_crop)
+                # Build ROI crops from keypoints for T5
+                _min_roi = self._get_roi_inward(target_crop, center, min_pt)
+                _max_roi = self._get_roi_inward(target_crop, center, max_pt)
+                min_val, max_val, err_str = self._extract_gauge_scale_gemini(
+                    target_crop, min_roi=_min_roi, max_roi=_max_roi
+                )
                 if err_str:
                     debug_info.append(f"Stage 2 (Gemini API) Failed: {err_str}")
                 elif min_val is not None and max_val is not None:

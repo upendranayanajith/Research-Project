@@ -201,26 +201,56 @@ async def compare_times(
             
         tb = res_before.get("time", "")
         ta = res_after.get("time", "")
-        
-        if ":" not in tb or ":" not in ta:
-            return JSONResponse(status_code=400, content={"error": "Both images must be analog clocks."})
-            
+
+        tb_is_gauge = ":" not in tb
+        ta_is_gauge = ":" not in ta
+
+        if tb_is_gauge and ta_is_gauge:
+            # Gauge vs Gauge — numeric delta
+            try:
+                vb = float(tb.replace("%", "").strip())
+                va = float(ta.replace("%", "").strip())
+                delta = va - vb
+                return {
+                    "time_before": tb,
+                    "time_after":  ta,
+                    "mode": "gauge_vs_gauge",
+                    "elapsed_minutes": None,
+                    "elapsed_text": f"Gauge reading changed from {tb} → {ta} (Δ = {delta:+.2f} units)",
+                    "processing_time": time.time() - start_time,
+                }
+            except ValueError:
+                return JSONResponse(status_code=400, content={
+                    "error": f"Could not parse gauge readings as numbers: '{tb}', '{ta}'"
+                })
+
+        if tb_is_gauge or ta_is_gauge:
+            # Mixed — one gauge, one clock
+            return JSONResponse(status_code=400, content={
+                "error": (
+                    f"Mixed image types: one is a gauge ('{tb}' or '{ta}'), "
+                    "the other is a clock. Upload two images of the same type."
+                )
+            })
+
+        # Both are clocks — original time-diff logic
         hb, mb = map(int, tb.split(":"))
         ha, ma = map(int, ta.split(":"))
-        
+
         min_b = (hb % 12) * 60 + mb
         min_a = (ha % 12) * 60 + ma
-        
+
         diff = min_a - min_b
         if diff < 0:
             diff += 720
-            
+
         elapsed_h = diff // 60
         elapsed_m = diff % 60
-        
+
         return {
             "time_before": tb,
             "time_after": ta,
+            "mode": "clock_vs_clock",
             "elapsed_minutes": diff,
             "elapsed_text": f"From {tb} to {ta} → {diff} minutes elapsed ({elapsed_h}h {elapsed_m}m)",
             "processing_time": time.time() - start_time
