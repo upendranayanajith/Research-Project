@@ -8,7 +8,11 @@ import torch.nn as nn
 from torchvision import transforms, models
 from ultralytics import YOLO
 from PIL import Image
-from app.core.xai import XaiVisualizer, SemanticExplainer
+from app.core.xai import (
+    XaiVisualizer, SemanticExplainer, LocalExplainer,
+    AdaptiveSemanticRouter, ContrastiveExplainer,
+    LimeExplainer, ShapExplainer, compute_entropy,
+)
 from app.core.metrics import calculate_gauge_reading, calculate_gauge_reading_advanced
 from app.core.c2_research import C2ResearchAnalyzer
 from app.core.c2_shadow_filter import SemanticShadowFilter
@@ -55,14 +59,36 @@ class HARPEngine:
         ])
 
         if os.path.exists(self.c3_path):
-            self.c3_model.load_state_dict(torch.load(self.c3_path, map_location=self.device))
+            raw_sd = torch.load(self.c3_path, map_location=self.device)
+            key_map = {"0.fc.weight": "0.fc.1.weight", "0.fc.bias": "0.fc.1.bias"}
+            remapped_sd = {key_map.get(k, k): v for k, v in raw_sd.items()}
+            missing, unexpected = self.c3_model.load_state_dict(remapped_sd, strict=False)
+            if missing:
+                print(f"⚠️  C3 load: missing keys: {missing}")
+            if unexpected:
+                print(f"⚠️  C3 load: unexpected keys: {unexpected}")
             self.c3_model.eval()
-            self.xai = XaiVisualizer(self.c3_model[0]) 
-            self.explainer = SemanticExplainer()
+
+            # ── XAI Stack (all 7 layers) ──────────────────────────────────────
+            self.xai             = XaiVisualizer(self.c3_model[0])       # L1 GradCAM++
+            self.local_explainer = LocalExplainer()                      # L2 heuristic
+            self.explainer       = SemanticExplainer()                   # L3 Gemini VLM
+            self.adaptive_router = AdaptiveSemanticRouter(self.explainer) # L4 entropy gate
+            self.contrastive_xai = ContrastiveExplainer()                # L5 "Why not?"
+            self.lime_explainer  = LimeExplainer()                       # L6 superpixel
+            self.shap_explainer  = ShapExplainer()                       # L7 attribution
+            print(f"✅ XAI Stack loaded:")
+            print(f"   L1 GradCAM++ (multi-layer): {'✅' if self.xai.available else '⚠️ unavailable'}")
+            print(f"   L3 Gemini VLM: {'✅' if self.explainer.available else '⚠️ no API key'}")
+            print(f"   L4 Entropy router: threshold={AdaptiveSemanticRouter.ENTROPY_THRESHOLD}")
+            print(f"   L6 LIME: {'✅' if self.lime_explainer.available else '⚠️ pip install lime'}")
+            print(f"   L7 SHAP: {'✅' if self.shap_explainer.available else '⚠️ pip install shap'}")
         else:
             print("⚠️ WARNING: C3 weights not found.")
             self.c3_model = None
-            self.explainer = None
+            self.xai = self.explainer = self.local_explainer = None
+            self.adaptive_router = self.contrastive_xai = None
+            self.lime_explainer  = self.shap_explainer  = None
         
         # --- [C2] Research Analyzer ---
         self.c2_research = C2ResearchAnalyzer()
@@ -83,11 +109,71 @@ class HARPEngine:
             return None
 
     def _get_c3_arch(self):
-        model = models.resnet18(weights=None)
-        num_ftrs = model.fc.in_features
-        model.fc = nn.Linear(num_ftrs, 1)
-        model = nn.Sequential(model, nn.Sigmoid())
+        """ResNet-18 with Dropout before the regression head for MC Dropout uncertainty."""
+        backbone = models.resnet18(weights=None)
+        num_ftrs = backbone.fc.in_features
+        # Replace FC with Dropout + Linear so MC Dropout works during inference
+        backbone.fc = nn.Sequential(
+            nn.Dropout(p=0.3),
+            nn.Linear(num_ftrs, 1)
+        )
+        model = nn.Sequential(backbone, nn.Sigmoid())
         return model
+
+    def _enable_dropout(self):
+        """Set all Dropout layers to train mode so they remain stochastic during inference."""
+        if self.c3_model is not None:
+            for m in self.c3_model.modules():
+                if isinstance(m, nn.Dropout):
+                    m.train()
+
+    def _predict_with_uncertainty(self, tensor: torch.Tensor, n_passes: int = 20):
+        """
+        Monte Carlo Dropout Uncertainty Estimation.
+
+        Temporarily enables dropout during N stochastic forward passes to estimate
+        epistemic uncertainty. Uses circular statistics to correctly handle the
+        0°/360° wraparound in angle predictions.
+
+        Args:
+            tensor:   (1, 3, 64, 64) normalised input tensor.
+            n_passes: Number of stochastic forward passes (default: 20).
+
+        Returns:
+            mean_angle_deg (float): Circular mean of all stochastic predictions.
+            std_deg        (float): Circular standard deviation — uncertainty proxy.
+        """
+        if self.c3_model is None:
+            return 0.0, 0.0
+
+        # Keep BatchNorm in eval mode (stable stats), Dropout in train mode (random masking)
+        self.c3_model.eval()
+        self._enable_dropout()
+
+        preds_deg = []
+        with torch.no_grad():
+            for _ in range(n_passes):
+                raw = self.c3_model(tensor).item()  # Sigmoid output in [0, 1]
+                preds_deg.append(raw * 360.0)
+
+        # Restore full eval mode (no stochasticity)
+        self.c3_model.eval()
+
+        # Circular statistics — essential for angles because 1° and 359° are adjacent
+        # Convert to radians on the full circle [0, 2π]
+        import scipy.stats
+        preds_rad = np.radians(preds_deg)
+        mean_rad  = scipy.stats.circmean(preds_rad, high=2 * np.pi, low=0)
+        std_rad   = scipy.stats.circstd(preds_rad,  high=2 * np.pi, low=0)
+        mean_deg  = float(np.degrees(mean_rad) % 360.0)
+        std_deg   = float(np.degrees(std_rad))
+
+        # Cache per-call uncertainties for surface in result payload
+        if not hasattr(self, '_last_uncertainties'):
+            self._last_uncertainties = []
+        self._last_uncertainties.append(std_deg)
+
+        return mean_deg, std_deg
 
     def _get_angle(self, center, point):
         dx, dy = point[0] - center[0], point[1] - center[1]
@@ -678,33 +764,74 @@ class HARPEngine:
                         refined_angles.append(rough_angle)
                         continue
                     c3_crops.append(crop)
-                    
+
                     pil_crop = Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
                     pil_resized = pil_crop.resize((64, 64))
                     t_input = self.c3_transform(pil_resized).unsqueeze(0).to(self.device)
-                    
                     norm_crop = np.array(pil_resized, dtype=np.float32) / 255.0
-                    hand_heatmap = self.xai.generate(t_input, norm_crop)
-                    heatmaps.append(hand_heatmap)
 
-                    with torch.no_grad():
-                        pred = self.c3_model(t_input).item()
-                    
-                    c3_angle = pred * 360.0
+                    # L1 — GradCAM++ multi-layer fusion → (vis_overlay, raw_cam)
+                    hand_heatmap_vis, raw_cam = self.xai.generate(t_input, norm_crop)
+                    heatmaps.append(hand_heatmap_vis)
+
+                    # MC Dropout — 20 stochastic passes → mean + uncertainty
+                    c3_angle, uncertainty_std = self._predict_with_uncertainty(t_input)
                     delta = c3_angle - 360 if c3_angle > 180 else c3_angle
-                    
-                    if self.explainer and force_expert:
-                        explanation = self.explainer.explain(
-                            crop, hand_heatmap, c3_angle, hand_type=f"Hand {i+1}"
+
+                    # L4 — AdaptiveSemanticRouter (L2 or L3 based on entropy)
+                    if self.adaptive_router and force_expert:
+                        xai_explanation, routing_reason, entropy_val = self.adaptive_router.route(
+                            raw_cam, crop, hand_heatmap_vis,
+                            c3_angle, hand_type=f"Hand {i+1}"
                         )
-                        debug_info.append(f"AI Insight Hand {i+1}: {explanation}")
+                        debug_info.append(f"XAI Hand {i+1}: {xai_explanation}")
+                        debug_info.append(f"XAI Routing (H{i+1}): {routing_reason}")
+                    else:
+                        entropy_val = compute_entropy(raw_cam) if raw_cam is not None else 0.0
+
+                    debug_info.append(
+                        f"Hand {i+1}: C3 angle={c3_angle:.1f}°, delta={delta:+.1f}°, "
+                        f"uncertainty=±{uncertainty_std:.1f}°, entropy={entropy_val:.3f}"
+                    )
+
+                    # L6 — LIME superpixel overlay
+                    if self.lime_explainer and self.lime_explainer.available and force_expert:
+                        try:
+                            lime_overlay = self.lime_explainer.explain(
+                                self.c3_model, t_input, norm_crop, n_samples=200
+                            )
+                            if lime_overlay is not None:
+                                visualizations[f'xai_lime_h{i+1}'] = lime_overlay
+                        except Exception as _e:
+                            debug_info.append(f"LIME H{i+1} error: {_e}")
+
+                    # L7 — SHAP DeepExplainer attribution
+                    if self.shap_explainer and self.shap_explainer.available and force_expert:
+                        try:
+                            bg = torch.zeros((5, 3, 64, 64), device=self.device)
+                            shap_overlay = self.shap_explainer.explain(
+                                self.c3_model, t_input, bg
+                            )
+                            if shap_overlay is not None:
+                                visualizations[f'xai_shap_h{i+1}'] = shap_overlay
+                        except Exception as _e:
+                            debug_info.append(f"SHAP H{i+1} error: {_e}")
+
+                    # Adaptive blend α = clip(1 − σ/20, 0, 1)
+                    alpha = float(np.clip(1.0 - (uncertainty_std / 20.0), 0.0, 1.0))
 
                     if abs(delta) > 20.0:
-                        debug_info.append(f"Hand {i}: Rejected C3 delta {delta:.1f}°")
+                        debug_info.append(
+                            f"Hand {i+1}: C3 delta exceeds 20° cap — keeping C2 angle "
+                            f"(α={alpha:.2f}, σ=±{uncertainty_std:.1f}°)"
+                        )
                         refined_angles.append(rough_angle)
                     else:
-                        debug_info.append(f"Hand {i}: Accepted C3 delta {delta:.1f}°")
-                        refined_angles.append((rough_angle + delta) % 360)
+                        blended = (alpha * (rough_angle + delta) + (1.0 - alpha) * rough_angle) % 360
+                        debug_info.append(
+                            f"Hand {i+1}: α={alpha:.2f} → blended {rough_angle:.1f}° + {delta:+.1f}° = {blended:.1f}°"
+                        )
+                        refined_angles.append(blended)
 
                 if len(heatmaps) == 2:
                     heatmap_img = np.hstack((heatmaps[0], heatmaps[1]))
@@ -712,14 +839,45 @@ class HARPEngine:
                     heatmap_img = heatmaps[0]
                 else:
                     heatmap_img = None
-                
+
                 visualizations['c3_crops'] = c3_crops
                 visualizations['c3_angles'] = self._draw_angles_on_img(target_crop, center, tip1, tip2, refined_angles[0], refined_angles[1])
-                
-                h_new, m_new, err_new, conf_new, cands_new, telemetry_log_new = self._solve_physics(refined_angles[0], refined_angles[1], length1=len1, length2=len2)
-                
+
+                # Build uncertainty summary for the result payload
+                unc_vals = getattr(self, '_last_uncertainties', [])
+                uncertainty_summary = ", ".join(
+                    [f"H{j+1}=±{unc_vals[j]:.1f}°" for j in range(len(unc_vals))]
+                ) if unc_vals else "N/A"
+                self._last_uncertainties = []  # Reset for next call
+
+                h_new, m_new, err_new, conf_new, cands_new, telemetry_log_new = self._solve_physics(
+                    refined_angles[0], refined_angles[1], length1=len1, length2=len2
+                )
+
                 ambiguity_warning_expert = self._resolve_ambiguity(refined_angles[0], refined_angles[1], h_new, m_new)
-                
+
+                # L5 — Contrastive XAI ("Why not X:XX?")
+                contrastive_text = ""
+                if self.contrastive_xai and len(heatmaps) > 0 and force_expert:
+                    # Use first hand's raw cam from the last iteration (approximate)
+                    try:
+                        _, raw_cam_h1 = self.xai.generate(
+                            self.c3_transform(
+                                Image.fromarray(cv2.cvtColor(c3_crops[0], cv2.COLOR_BGR2RGB))
+                                .resize((64, 64))
+                            ).unsqueeze(0).to(self.device),
+                            np.array(
+                                Image.fromarray(cv2.cvtColor(c3_crops[0], cv2.COLOR_BGR2RGB)).resize((64, 64)),
+                                dtype=np.float32
+                            ) / 255.0
+                        )
+                        contrastive_text = self.contrastive_xai.explain(
+                            raw_cam_h1, h_new, m_new, cands_new
+                        )
+                        debug_info.append(contrastive_text)
+                    except Exception as _e:
+                        debug_info.append(f"Contrastive XAI error: {_e}")
+
                 debug_info.append(f"C4 Telemetry Trace: {telemetry_log_new}")
                 cand_strings_new = [f"{c['hour']}:{c['minute']:02d} ({c['confidence']:.1f}%)" for c in cands_new]
                 debug_info.append(f"Expert Top 3 Candidates: {', '.join(cand_strings_new)}")
@@ -734,7 +892,7 @@ class HARPEngine:
                 
                 return {
                     "time": f"{h_new}:{m_new:02d}",
-                    "method": "Expert Path (C1+C2+C3+C4)",
+                    "method": "Expert Path (C1+C2+C3+C4+MC-Dropout+XAI-7)",
                     "confidence": f"{conf_new:.1f}%",
                     "heatmap": heatmap_img,
                     "debug": debug_info,
@@ -753,8 +911,11 @@ class HARPEngine:
                     "c1_gauge_conf": float(g_conf) if g_conf != -1.0 else 0.0,
                     "c1_clock_quality": c_quality,
                     "c1_gauge_quality": g_quality,
-                    "c2_research": c2_research_data
+                    "c2_research": c2_research_data,
+                    "uncertainty_deg": uncertainty_summary,
+                    "xai_method": "GradCAM++ (L2+L3+L4 multi-layer) + MC-Dropout",
+                    "contrastive_xai": contrastive_text,
                 }
 
-# Alias mapping so you don't break existing `main.py` imports 
+# Alias mapping so you don't break existing `main.py` imports
 ClockEngine = HARPEngine

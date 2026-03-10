@@ -45,18 +45,21 @@ def render_c1_localization(viz, res):
         st.markdown(f"**Identified Class:** `{type_str}`")
         
         if "c1_conf" in res:
-            conf_perc = res.get("c1_conf", 0.0)
-            conf_display = conf_perc * 100
-            
+            raw_conf = res.get("c1_conf", 0.0)
+            # Normalise: YOLO may return [0,1] or occasionally a % value > 1
+            conf_perc = float(raw_conf) / 100.0 if raw_conf > 1.0 else float(raw_conf)
+            conf_perc = max(0.0, min(1.0, conf_perc))   # hard clamp to [0,1]
+            conf_display = conf_perc * 100.0
+
             st.markdown(f"**Detection Probability:** {conf_display:.1f}%")
             if conf_display >= 80:
-                st.progress(conf_perc, text=f"High Confidence ")
+                st.progress(conf_perc, text="High Confidence")
                 st.success("Target clearly identified")
             elif conf_display >= 50:
-                st.progress(conf_perc, text=f"Medium Confidence ")
+                st.progress(conf_perc, text="Medium Confidence")
                 st.warning("Target found, but the model is somewhat unsure")
             else:
-                st.progress(max(0.0, conf_perc), text=f"Low Confidence ")
+                st.progress(conf_perc, text="Low Confidence")
                 st.error("Target identification is poor")
         else:
             st.info("No confidence data available.")

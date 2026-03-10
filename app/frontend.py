@@ -558,18 +558,133 @@ def display_results(data):
                     if upd > 0:
                         st.markdown(f"**1° Angle =** {upd:.4f} scale units")
                 else:
-                    st.markdown(f"**H:** {res['angles'].get('hand1', 0):.1f}°")
-                    st.markdown(f"**M:** {res['angles'].get('hand2', 0):.1f}°")
+                    h_ang = res['angles'].get('hand1', 0)
+                    m_ang = res['angles'].get('hand2', 0)
+                    st.markdown(f"**H:** {h_ang:.1f}°")
+                    st.markdown(f"**M:** {m_ang:.1f}°")
+
+        # ── MC Dropout Uncertainty Panel ──────────────────────────────────────
+        unc_str = res.get("uncertainty_deg", "")
+        if unc_str and unc_str != "N/A":
+            st.markdown("---")
+            st.markdown(f"#### {icon('analytics')} MC Dropout Uncertainty (20 stochastic passes)", unsafe_allow_html=True)
+
+            # Parse "H1=±5.2°, H2=±8.7°" into individual values
+            unc_parts = [p.strip() for p in unc_str.split(",") if p.strip()]
+            unc_cols = st.columns(len(unc_parts)) if unc_parts else []
+            for col, part in zip(unc_cols, unc_parts):
+                try:
+                    label, val_str = part.split("=")
+                    sigma = float(val_str.replace("±", "").replace("°", "").strip())
+                    alpha = max(0.0, min(1.0, 1.0 - sigma / 20.0))
+
+                    # Color-code: green < 5°, yellow 5-15°, red > 15°
+                    if sigma < 5.0:
+                        color, grade = "#22c55e", "High Confidence"
+                    elif sigma < 15.0:
+                        color, grade = "#f59e0b", "Moderate Confidence"
+                    else:
+                        color, grade = "#ef4444", "Low Confidence (C2 preferred)"
+
+                    col.markdown(f"""
+                    <div style="background:#0f0f1a;border:1px solid {color}44;border-radius:10px;padding:14px;text-align:center;">
+                        <div style="color:#94a3b8;font-size:11px;margin-bottom:4px;">{label.strip()} σ (uncertainty)</div>
+                        <div style="color:{color};font-size:28px;font-weight:800;">±{sigma:.1f}°</div>
+                        <div style="color:#64748b;font-size:11px;margin-top:4px;">{grade}</div>
+                        <div style="margin-top:8px;background:#1e293b;border-radius:4px;height:6px;">
+                            <div style="width:{int(alpha*100)}%;height:6px;background:{color};border-radius:4px;"></div>
+                        </div>
+                        <div style="color:#64748b;font-size:10px;margin-top:3px;">α = {alpha:.2f}  (C3 blend weight)</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                except Exception:
+                    col.markdown(f"`{part}`")
+
+            with st.expander("ℹ️ How MC Dropout works"):
+                st.markdown("""
+                **Monte Carlo Dropout** keeps the `Dropout(0.3)` layer stochastic during inference.
+                After **20 forward passes**, predictions spread over a distribution:
+                - **σ (sigma)** = circular standard deviation of the 20 angle predictions
+                - **α (alpha)** = `clip(1 − σ/20, 0, 1)` — weight given to C3's correction
+                - When **σ < 5°**, the model is certain and C3 dominates
+                - When **σ > 15°**, uncertainty is high and C2 geometry is preferred
+                - Final angle = `α × (C2 + C3 delta) + (1−α) × C2`
+                """)
+        # ──────────────────────────────────────────────────────────────────────
+
         if "c3_crops" in viz and viz["c3_crops"]:
             st.markdown("---")
-            st.markdown(f"**{icon('image')} ResNet Inputs**", unsafe_allow_html=True)
-            c_cols = st.columns(len(viz["c3_crops"]))
+
+            # ── ResNet-18 Input Crops ────────────────────────────────────────
+            st.markdown(f"**{icon('image')} ResNet-18 Input Crops (MC Dropout active)**", unsafe_allow_html=True)
+            c_cols = st.columns(max(len(viz["c3_crops"]), 1))
             for idx, (col, crop) in enumerate(zip(c_cols, viz["c3_crops"])):
-                col.image(base64.b64decode(crop), width=100)
-            if data.get("heatmap_b64"):
-                st.markdown(f"**{icon('opacity')} Attention Map (Grad-CAM)**", unsafe_allow_html=True)
-                st.image(base64.b64decode(data["heatmap_b64"]), width=300)
-        else: st.info("Expert AI skipped (Fast Path or Gauge Mode used).")
+                col.image(base64.b64decode(crop), caption=f"Hand {idx+1} crop (64×64)", width=120)
+
+            # ── XAI Method badge ─────────────────────────────────────────────
+            xai_method = res.get("xai_method", "GradCAM")
+            st.markdown(
+                f"<span style='background:#a78bfa22;color:#a78bfa;padding:3px 10px;"
+                f"border-radius:4px;font-size:11px;font-weight:700;border:1px solid #a78bfa44;'>"
+                f"🔬 {xai_method}</span>",
+                unsafe_allow_html=True
+            )
+
+            # ── 3-tab XAI Heatmap Display ────────────────────────────────────
+            xai_t1, xai_t2, xai_t3 = st.tabs(["🔥 GradCAM++", "🟩 LIME", "🔴 SHAP"])
+
+            with xai_t1:
+                if data.get("heatmap_b64"):
+                    st.image(base64.b64decode(data["heatmap_b64"]),
+                             caption="GradCAM++ — fused L2×0.20 + L3×0.30 + L4×0.50", width=380)
+                else:
+                    st.info("GradCAM++ heatmap not available.")
+
+            with xai_t2:
+                lime_found = False
+                for hi in range(1, 3):
+                    key = f"xai_lime_h{hi}"
+                    if key in viz and viz[key]:
+                        st.image(base64.b64decode(viz[key]),
+                                 caption=f"LIME — Hand {hi} (top-5 superpixels, 200 perturbations)", width=300)
+                        lime_found = True
+                if not lime_found:
+                    st.info("LIME overlay not available. Run with `pip install lime` and Force Expert Path.")
+
+            with xai_t3:
+                shap_found = False
+                for hi in range(1, 3):
+                    key = f"xai_shap_h{hi}"
+                    if key in viz and viz[key]:
+                        st.image(base64.b64decode(viz[key]),
+                                 caption=f"SHAP — Hand {hi} attribution (red=high positive influence)", width=300)
+                        shap_found = True
+                if not shap_found:
+                    st.info("SHAP map not available. Run with `pip install shap` and Force Expert Path.")
+
+            # ── Contrastive XAI ──────────────────────────────────────────────
+            contrastive = res.get("contrastive_xai", "")
+            if contrastive:
+                st.markdown("---")
+                st.markdown(f"#### {icon('compare_arrows')} Contrastive XAI — Why this time?",
+                            unsafe_allow_html=True)
+                lines = contrastive.split("\n")
+                # Header line
+                if lines:
+                    st.markdown(f"**{lines[0]}**")
+                for line in lines[1:]:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    color = "#22c55e" if "✅" in line else "#ef4444" if "❌" in line else "#94a3b8"
+                    st.markdown(
+                        f"<div style='padding:4px 10px;margin:2px 0;border-left:3px solid {color};"
+                        f"background:{color}11;border-radius:0 4px 4px 0;font-size:13px;color:#e2e8f0;'>"
+                        f"{line}</div>",
+                        unsafe_allow_html=True
+                    )
+        else:
+            st.info("Expert AI skipped (Fast Path or Gauge Mode). Enable 'Force Expert Path' to activate XAI.")
 
     with tab4:
         st.markdown(f"# {icon('schedule')} {res['time']}", unsafe_allow_html=True)
