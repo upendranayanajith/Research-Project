@@ -123,6 +123,55 @@ class ClockProcessor(VideoProcessorBase):
 # ==========================================
 # [Shared] HELPER FUNCTIONS
 # ==========================================
+@st.dialog("Cognitive Reasoning Report", width="large")
+def show_reasoning_report(data):
+    res = data["result"]
+    
+    st.markdown(f"### {icon('description')} Official Diagnostic Report")
+    st.markdown(f"**Generated on:** {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    st.markdown("---")
+    
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        st.markdown(f"#### {icon('summarize')} Executive Summary")
+        st.write(f"**Final Reading:** :green[{res.get('time', 'N/A')}]")
+        st.write(f"**Detection Method:** {res.get('method', 'N/A')}")
+        st.write(f"**Confidence:** {res.get('confidence', 'N/A')}")
+        st.write(f"**AM/PM Inference:** {res.get('ampm', 'N/A')}")
+    
+    with col2:
+        st.markdown(f"#### {icon('checklist')} Pipeline Status")
+        stages = ["C1 Detection", "C2 Keypoints", "C3 Expert AI", "C4 Physics"]
+        for s in stages:
+            is_done = True if "Expert" in res["method"] else (s != "C3 Expert AI")
+            st.markdown(f"{icon('check_circle' if is_done else 'cancel', color='green' if is_done else 'red')} {s}")
+
+    st.markdown("---")
+    st.markdown(f"#### {icon('psychology')} AI Logical Trace")
+    if "debug" in res:
+        for trace in res["debug"]:
+            if "C4 Telemetry Trace" in trace:
+                st.info(trace)
+            elif "Heuristics" in trace:
+                st.success(trace)
+            else:
+                st.markdown(f"{icon('chevron_right', size=18)} {trace}")
+    else:
+        st.warning("No trace logs available for this session.")
+
+    st.markdown("---")
+    st.markdown(f"#### {icon('analytics')} Physics Validation")
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.write(f"**Angular Shift (H):** {res.get('angles', {}).get('hand1', 0):.1f}°")
+        st.write(f"**Angular Shift (M):** {res.get('angles', {}).get('hand2', 0):.1f}°")
+    with col_b:
+        st.write(f"**Ambiguity:** {res.get('ambiguity', 'None detected')}")
+        st.write(f"**Accuracy:** {res.get('drift', 'N/A')}")
+
+    if st.button("Close Report", type="primary"):
+        st.rerun()
+
 def display_results(data):
     res = data["result"]
     viz = data.get("visualizations", {})
@@ -199,6 +248,7 @@ def display_results(data):
                 st.markdown(f"**{icon('opacity')} Attention Map (Grad-CAM)**", unsafe_allow_html=True)
                 st.image(base64.b64decode(data["heatmap_b64"]), width=300)
         else: st.info("Expert AI skipped (Fast Path or Gauge Mode used).")
+
     with tab4:
         st.markdown(f"# {icon('schedule')} {res['time']}", unsafe_allow_html=True)
         st.markdown(f"**Reasoning:** `{res.get('reasoning', 'N/A')}`")
@@ -207,14 +257,54 @@ def display_results(data):
             st.markdown(f"**{icon(ampm_icon)} Time of Day:** {res['ampm']}", unsafe_allow_html=True)
         if "drift" in res:
             st.markdown(f"**{icon('compare_arrows')} Accuracy vs Real-time:** {res['drift']}", unsafe_allow_html=True)
-        if "ambiguity" in res and res["ambiguity"]:
-            st.warning(f"{res['ambiguity']}")
+        
+        st.markdown("---")
+        col_l, col_r = st.columns(2)
+        with col_l:
+            st.markdown(f"#### {icon('wb_sunny')} AM/PM Inference", unsafe_allow_html=True)
+            if "ampm" in res:
+                st.info(f"Detected: **{res['ampm']}**")
+            else:
+                st.info("Not available.")
+                
+        with col_r:
+            st.markdown(f"#### {icon('help_outline')} Ambiguity Analysis", unsafe_allow_html=True)
+            amb_warning = res.get("ambiguity")
+            candidates = res.get("ambiguity_candidates", [])
+            
+            if amb_warning or candidates:
+                if amb_warning:
+                    st.markdown(f"<p style='color:orange; font-weight:bold;'>{icon('warning', color='orange')} {amb_warning}</p>", unsafe_allow_html=True)
+                
+                if candidates:
+                    def get_fit(err):
+                        if err < 5.0: return "Excellent"
+                        if err < 15.0: return "Good"
+                        return "Marginal"
+                        
+                    cdf = pd.DataFrame([{
+                        "Time": f"{c['hour']}:{c['minute']:02d}",
+                        "Error (°)": round(c['error'], 2),
+                        "Confidence %": round(c['confidence'], 1),
+                        "Fit": get_fit(c['error']),
+                    } for c in candidates])
+                    st.dataframe(cdf, use_container_width=True, hide_index=True)
+            else:
+                st.info("No ambiguity detected.")
+
+        st.markdown("---")
+        if st.button("📄 Generate Cognitive Reasoning Report", use_container_width=True):
+            show_reasoning_report(data)
 
 # ==========================================
 # CUSTOM NAVIGATION LOGIC
 # ==========================================
 if "page" not in st.session_state:
     st.session_state.page = "analysis"
+if "analysis_result" not in st.session_state:
+    st.session_state.analysis_result = None
+if "last_uploaded_file" not in st.session_state:
+    st.session_state.last_uploaded_file = None
 
 def nav_button(page_key, label, icon_name):
     """Creates a navigation button with an icon."""
@@ -264,6 +354,12 @@ if st.session_state.page == "analysis":
     manual_min = colA.text_input("Min Value (Optional)", "")
     manual_max = colB.text_input("Max Value (Optional)", "")
 
+    if uploaded_file:
+        # Clear results if a new file is uploaded
+        if uploaded_file.name != st.session_state.last_uploaded_file:
+            st.session_state.analysis_result = None
+            st.session_state.last_uploaded_file = uploaded_file.name
+
     if uploaded_file and st.button("Run Analysis", type="primary"):
         with st.spinner("Processing..."):
             try:
@@ -272,7 +368,7 @@ if st.session_state.page == "analysis":
                 
                 image = Image.open(uploaded_file)
                 img_byte_arr = io.BytesIO()
-                image.save(img_byte_arr, format=image.format)
+                image.save(img_byte_arr, format="JPEG") # Consistency
                 files = {"file": ("image.jpg", img_byte_arr.getvalue(), "image/jpeg")}
                 data_form = {
                     "force_expert": str(force_expert),
@@ -281,9 +377,16 @@ if st.session_state.page == "analysis":
                     "device_time_str": device_time_str
                 }
                 response = requests.post(f"{API_URL}/analyze", files=files, data=data_form)
-                if response.status_code == 200: display_results(response.json())
-                else: st.error(f"Server Error: {response.status_code}")
-            except Exception as e: st.error(f"Connection Failed: {e}")
+                if response.status_code == 200: 
+                    st.session_state.analysis_result = response.json()
+                else: 
+                    st.error(f"Server Error: {response.status_code}")
+            except Exception as e: 
+                st.error(f"Connection Failed: {e}")
+
+    # Persist results across reruns (for Dialog support)
+    if st.session_state.analysis_result:
+        display_results(st.session_state.analysis_result)
 
 # --- PAGE 2: WEBCAM ---
 elif st.session_state.page == "webcam":

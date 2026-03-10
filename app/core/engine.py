@@ -86,10 +86,15 @@ class HARPEngine:
     # --- CLOCK PHYSICS SOLVER (Restored from main branch) ---
     def _solve_physics(self, a1, a2, length1=None, length2=None, top_n=3, sigma=15.0):
         telemetry_log = "[C4 Physics Initialized]"
-        err_a = np.abs(a1 - self.theory_h) + np.abs(a2 - self.theory_m)
-        err_a = np.minimum(err_a, 360 - err_a) # Fix from 720 to 360 to match correct angular logic!
-        err_b = np.abs(a2 - self.theory_h) + np.abs(a1 - self.theory_m)
-        err_b = np.minimum(err_b, 360 - err_b)
+        
+        # Correct individual hand difference logic
+        diff_h1_a = np.abs(a1 - self.theory_h)
+        diff_m1_a = np.abs(a2 - self.theory_m)
+        err_a = np.minimum(diff_h1_a, 360 - diff_h1_a) + np.minimum(diff_m1_a, 360 - diff_m1_a)
+        
+        diff_h1_b = np.abs(a2 - self.theory_h)
+        diff_m1_b = np.abs(a1 - self.theory_m)
+        err_b = np.minimum(diff_h1_b, 360 - diff_h1_b) + np.minimum(diff_m1_b, 360 - diff_m1_b)
         
         # --- UPSTREAM HEURISTIC DATA FUSION: HAND MORPHOLOGY WEIGHTING ---
         if length1 is not None and length2 is not None and length1 > 0 and length2 > 0:
