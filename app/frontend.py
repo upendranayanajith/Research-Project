@@ -113,12 +113,26 @@ class ClockProcessor(VideoProcessorBase):
             color = (0, 255, 0) if "Fast" in method or "Gauge" in method else (0, 0, 255)
             cv2.putText(img, f"Mode: {method}", (50, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
             
-            # Only show angles if it's a clock
+            # F5: Gauge-aware angle overlay
             angles = res.get("angles") or {}
-            if angles.get("hand1", 0) != 0.0:
-                a1 = angles.get("hand1", 0)
-                a2 = angles.get("hand2", 0)
-                cv2.putText(img, f"H:{a1:.0f} M:{a2:.0f}", (50, 190), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+            if "Gauge" in res.get("method", ""):
+                # Gauge: show span, needle, and scale range
+                span   = angles.get("span",   0)
+                needle = angles.get("needle", 0)
+                scale  = res.get("scale", {})
+                s_min  = scale.get("min", "?")
+                s_max  = scale.get("max", "?")
+                cv2.putText(img, f"Span:{span:.0f} Ndl:{needle:.0f}", (50, 190),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 230, 200), 2)
+                cv2.putText(img, f"Scale:[{s_min},{s_max}]", (50, 225),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (180, 180, 255), 2)
+            else:
+                # Clock: show hour/minute hand angles
+                if angles.get("hand1", 0) != 0.0:
+                    a1 = angles.get("hand1", 0)
+                    a2 = angles.get("hand2", 0)
+                    cv2.putText(img, f"H:{a1:.0f} M:{a2:.0f}", (50, 190),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
 
         cv2.putText(img, f"FPS: {self.fps}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
         return av.VideoFrame.from_ndarray(img, format="bgr24")
@@ -280,22 +294,36 @@ def display_results(data):
     st.markdown(f"**Identified Type:** <span style='color:white; font-size:24px'> {type_identified}</span>", unsafe_allow_html=True)
     st.markdown(f"**Method Used:** <span style='color:{method_color}; font-size:22px'>{icon(method_icon, size=20)} {res['method']}</span>", unsafe_allow_html=True)
     
-    stages = [
-        ("C1 Localization", "crop_free", ["C1", "C2", "C4"]),
-        ("C2 Structure", "timeline", ["C1", "C2", "C4"]),
-        ("C3 Expert AI", "model_training", ["Expert"]),
-        ("C4 Physics", "functions", ["C1", "C2", "C4"])
-    ]
-    
-    cols = st.columns(4)
-    for col, (name, icn, active_list) in zip(cols, stages):
-        is_active = False
-        if "Expert" in res["method"]:
-            is_active = True 
-        elif name.split()[0] in active_list and ("Fast" in res["method"] or "Gauge" in res["method"]) and "Expert" not in name:
-            is_active = True
-        color = "green" if is_active else "grey"
-        col.markdown(f"{icon(icn, color=color)} {name}", unsafe_allow_html=True)
+    # ── F3: Pipeline status badges — gauge-aware ──────────────────────────────
+    is_gauge_result = "Gauge" in res["method"]
+    if is_gauge_result:
+        _scale_stage = res.get("scale_stage", "failed")
+        stages = [
+            ("C1 Localization",   "crop_free",      True),
+            ("C2 Keypoints",      "timeline",        True),
+            ("Scale Extraction",  "document_search", _scale_stage != "failed"),
+            ("C4 Reading",        "functions",       True),
+        ]
+        cols = st.columns(4)
+        for col, (name, icn, active) in zip(cols, stages):
+            color = "green" if active else "red"
+            col.markdown(f"{icon(icn, color=color)} {name}", unsafe_allow_html=True)
+    else:
+        stages = [
+            ("C1 Localization", "crop_free",      ["C1", "C2", "C4"]),
+            ("C2 Structure",    "timeline",        ["C1", "C2", "C4"]),
+            ("C3 Expert AI",    "model_training",  ["Expert"]),
+            ("C4 Physics",      "functions",       ["C1", "C2", "C4"])
+        ]
+        cols = st.columns(4)
+        for col, (name, icn, active_list) in zip(cols, stages):
+            is_active = False
+            if "Expert" in res["method"]:
+                is_active = True
+            elif name.split()[0] in active_list and "Fast" in res["method"] and "Expert" not in name:
+                is_active = True
+            color = "green" if is_active else "grey"
+            col.markdown(f"{icon(icn, color=color)} {name}", unsafe_allow_html=True)
     
     st.markdown("---")
     tab1, tab2, tab3, tab4 = st.tabs(["Localization", "Structure", "Expert AI", "Result"])
@@ -1052,51 +1080,117 @@ def display_results(data):
 
 
     with tab4:
-        st.markdown(f"# {icon('schedule')} {res['time']}", unsafe_allow_html=True)
-        st.markdown(f"**Reasoning:** `{res.get('reasoning', 'N/A')}`")
-        if "ampm" in res:
-            ampm_icon = "wb_sunny" if "AM" in res["ampm"] else "bedtime"
-            st.markdown(f"**{icon(ampm_icon)} Time of Day:** {res['ampm']}", unsafe_allow_html=True)
-        if "drift" in res:
-            st.markdown(f"**{icon('compare_arrows')} Accuracy vs Real-time:** {res['drift']}", unsafe_allow_html=True)
-        
-        st.markdown("---")
-        col_l, col_r = st.columns(2)
-        with col_l:
-            st.markdown(f"#### {icon('wb_sunny')} AM/PM Inference", unsafe_allow_html=True)
-            if "ampm" in res:
-                st.info(f"Detected: **{res['ampm']}**")
-            else:
-                st.info("Not available.")
-                
-        with col_r:
-            st.markdown(f"#### {icon('help_outline')} Ambiguity Analysis", unsafe_allow_html=True)
-            amb_warning = res.get("ambiguity")
-            candidates = res.get("ambiguity_candidates", [])
-            
-            if amb_warning or candidates:
-                if amb_warning:
-                    st.markdown(f"<p style='color:orange; font-weight:bold;'>{icon('warning', color='orange')} {amb_warning}</p>", unsafe_allow_html=True)
-                
-                if candidates:
-                    def get_fit(err):
-                        if err < 5.0: return "Excellent"
-                        if err < 15.0: return "Good"
-                        return "Marginal"
-                        
-                    cdf = pd.DataFrame([{
-                        "Time": f"{c['hour']}:{c['minute']:02d}",
-                        "Error (°)": round(c['error'], 2),
-                        "Confidence %": round(c['confidence'], 1),
-                        "Fit": get_fit(c['error']),
-                    } for c in candidates])
-                    st.dataframe(cdf, width="stretch", hide_index=True)
-            else:
-                st.info("No ambiguity detected.")
+        is_gauge_t4 = "Gauge" in res.get("method", "")
+        if is_gauge_t4:
+            # ── GAUGE RESULT TAB ─────────────────────────────────────────────
+            _read_icon = "speed"
+            st.markdown(f"# {icon(_read_icon)} {res['time']}", unsafe_allow_html=True)
+            st.markdown(f"**Reasoning:** `{res.get('reasoning', 'N/A')}`")
 
-        st.markdown("---")
-        if st.button("📄 Generate Cognitive Reasoning Report", width="stretch"):
-            show_reasoning_report(data)
+            _scale = res.get("scale", {})
+            _angles = res.get("angles", {})
+            _gconf = res.get("gauge_confidence", {})
+            _gunc = res.get("gauge_uncertainty", {})
+            _stage_labels = {"manual": "✏️ Manual", "gemini": "✨ Gemini", "ocr": "🔍 OCR", "failed": "❌ Failed"}
+            _stage = res.get("scale_stage", "failed")
+
+            st.markdown("---")
+            # Scale info row
+            _sm, _sx, _su = st.columns(3)
+            _sm.metric("Scale Minimum", str(_scale.get("min", "?")))
+            _sx.metric("Scale Maximum", str(_scale.get("max", "?")))
+            _su.metric("Scale Extraction", _stage_labels.get(_stage, _stage))
+
+            # Needle info row
+            _ns, _nn, _nr = st.columns(3)
+            _ns.metric("Span", f"{_angles.get('span', 0):.1f}°")
+            _nn.metric("Needle", f"{_angles.get('needle', 0):.1f}°")
+            _upd = _angles.get("units_per_deg", 0.0)
+            _nr.metric("Resolution", f"{_upd:.4f} u/°" if _upd > 0 else "N/A")
+
+            # Confidence + uncertainty row
+            st.markdown("---")
+            _ca, _cb = st.columns(2)
+            if _gconf:
+                _tier = _gconf.get("tier", "N/A")
+                _score = _gconf.get("score", 0)
+                _tier_colors = {"HIGH": "#22c55e", "MEDIUM": "#38bdf8", "LOW": "#f59e0b", "UNRELIABLE": "#ef4444"}
+                _tc = _tier_colors.get(_tier, "#94a3b8")
+                _ca.markdown(
+                    f"<div style='background:#0f0f1a;border:1px solid {_tc}44;border-radius:8px;padding:12px;text-align:center;'>"
+                    f"<div style='color:#64748b;font-size:10px;'>Reading Confidence</div>"
+                    f"<div style='color:{_tc};font-size:28px;font-weight:800;'>{_score:.0f}%</div>"
+                    f"<div style='color:#475569;font-size:10px;'>{_tier}</div></div>",
+                    unsafe_allow_html=True
+                )
+            if _gunc:
+                _cb.markdown(
+                    f"<div style='background:#0f0f1a;border:1px solid #f59e0b44;border-radius:8px;padding:12px;text-align:center;'>"
+                    f"<div style='color:#64748b;font-size:10px;'>Uncertainty</div>"
+                    f"<div style='color:#f59e0b;font-size:22px;font-weight:800;'>±{_gunc.get('total_deg', 0):.1f}°</div>"
+                    f"<div style='color:#475569;font-size:10px;'>{_gunc.get('summary', '')}</div></div>",
+                    unsafe_allow_html=True
+                )
+
+            # C4 gauge confidence result
+            _c4g = res.get("c4_confidence")
+            if _c4g:
+                st.markdown("---")
+                _tier = _c4g.get("tier", "N/A")
+                _tm = {"CERTAIN": "🟢", "CONFIDENT": "🔵", "UNCERTAIN": "🟠", "UNRELIABLE": "🔴"}
+                st.info(f"{_tm.get(_tier,'⚪')} **C4 Gauge Insight:** Tier={_tier}, Score={_c4g.get('score',0)}/100, Angular gap={_c4g.get('angular_gap',0):.1f}°")
+
+            st.markdown("---")
+            if st.button("📄 Generate Cognitive Reasoning Report", width="stretch"):
+                show_reasoning_report(data)
+
+        else:
+            # ── CLOCK RESULT TAB (unchanged) ─────────────────────────────────
+            st.markdown(f"# {icon('schedule')} {res['time']}", unsafe_allow_html=True)
+            st.markdown(f"**Reasoning:** `{res.get('reasoning', 'N/A')}`")
+            if "ampm" in res:
+                ampm_icon = "wb_sunny" if "AM" in res["ampm"] else "bedtime"
+                st.markdown(f"**{icon(ampm_icon)} Time of Day:** {res['ampm']}", unsafe_allow_html=True)
+            if "drift" in res:
+                st.markdown(f"**{icon('compare_arrows')} Accuracy vs Real-time:** {res['drift']}", unsafe_allow_html=True)
+            
+            st.markdown("---")
+            col_l, col_r = st.columns(2)
+            with col_l:
+                st.markdown(f"#### {icon('wb_sunny')} AM/PM Inference", unsafe_allow_html=True)
+                if "ampm" in res:
+                    st.info(f"Detected: **{res['ampm']}**")
+                else:
+                    st.info("Not available.")
+                    
+            with col_r:
+                st.markdown(f"#### {icon('help_outline')} Ambiguity Analysis", unsafe_allow_html=True)
+                amb_warning = res.get("ambiguity")
+                candidates = res.get("ambiguity_candidates", [])
+
+                if amb_warning or candidates:
+                    if amb_warning:
+                        st.markdown(f"<p style='color:orange; font-weight:bold;'>{icon('warning', color='orange')} {amb_warning}</p>", unsafe_allow_html=True)
+                    
+                    if candidates:
+                        def get_fit(err):
+                            if err < 5.0: return "Excellent"
+                            if err < 15.0: return "Good"
+                            return "Marginal"
+                            
+                        cdf = pd.DataFrame([{
+                            "Time": f"{c['hour']}:{c['minute']:02d}",
+                            "Error (°)": round(c['error'], 2),
+                            "Confidence %": round(c['confidence'], 1),
+                            "Fit": get_fit(c['error']),
+                        } for c in candidates])
+                        st.dataframe(cdf, width="stretch", hide_index=True)
+                else:
+                    st.info("No ambiguity detected.")
+
+            st.markdown("---")
+            if st.button("📄 Generate Cognitive Reasoning Report", width="stretch", key="clock_report_btn"):
+                show_reasoning_report(data)
 
 # ==========================================
 # CUSTOM NAVIGATION LOGIC

@@ -808,6 +808,41 @@ class HARPEngine:
                 except Exception as e:
                     debug_info.append(f"Gauge XAI Error: {e}")
 
+            # --- [T3] C4 CONFIDENCE ANALYZER — gauge-adapted call ---
+            # Reuse C4ConfidenceAnalyzer with gauge semantics:
+            #   a1 = needle angle from min (span start), a2 = span end (fixed = span)
+            #   error = angular "error proxy" inferred from confidence gap (lower score → higher error)
+            #   h, m = 0, 0  (unused clock fields — pass neutral values)
+            try:
+                _error_proxy = max(0.0, (1.0 - c2_gauge_conf) * 20.0)  # 0° at conf=1.0, 20° at conf=0.0
+                c4_gauge_result = self.c4_confidence.analyze(
+                    a1=needle, a2=span, error=_error_proxy, h=0, m=0
+                )
+                c4_gauge_dict = c4_gauge_result.to_dict()
+                debug_info.append(f"C4 Gauge Confidence: {c4_gauge_dict['tier']} ({c4_gauge_dict['score']:.1f}/100)")
+            except Exception as _e:
+                c4_gauge_dict = None
+                debug_info.append(f"C4 Gauge Confidence Error: {_e}")
+
+            # --- [T4] GAUGE UNCERTAINTY QUANTIFICATION ---
+            # Propagates three independent uncertainty sources into a single estimate
+            #   kpt_unc:   how much keypoint jitter could shift the needle (std proxy)
+            #   scale_unc: uncertainty from scale extraction method
+            #   quality_unc: image quality degradation factor
+            _scale_unc_map = {"manual": 0.0, "gemini": 2.0, "ocr": 5.0, "failed": 15.0}
+            _kpt_unc    = (1.0 - c2_gauge_conf) * 10.0           # 0–10° equivalent
+            _scale_unc  = _scale_unc_map.get(scale_stage, 8.0)   # reading error from method
+            _qual_unc   = max(0.0, (100 - quality.get("overall", 50)) / 20.0)  # 0–5°
+            _total_unc  = round((_kpt_unc**2 + _scale_unc**2 + _qual_unc**2) ** 0.5, 2)
+            gauge_uncertainty = {
+                "total_deg":    _total_unc,
+                "kpt_deg":      round(_kpt_unc, 2),
+                "scale_deg":    _scale_unc,
+                "quality_deg":  round(_qual_unc, 2),
+                "summary":      f"±{_total_unc:.1f}° total (kpt={_kpt_unc:.1f}°, scale={_scale_unc:.1f}°, qual={_qual_unc:.1f}°)",
+            }
+            debug_info.append(f"Gauge Uncertainty: {gauge_uncertainty['summary']}")
+
             return {
                 "time": time_str,
                 "method": method_str,
@@ -830,7 +865,10 @@ class HARPEngine:
                 "gauge_confidence": gauge_confidence,
                 "keypoint_confidence": round(float(c2_gauge_conf), 4),
                 "gauge_xai": gauge_xai_text,
+                "c4_confidence": c4_gauge_dict,       # [T3] gauge-adapted C4 confidence
+                "gauge_uncertainty": gauge_uncertainty, # [T4] uncertainty breakdown
             }
+
 
         # ==========================================
         # CLOCK LOGIC PIPELINE
