@@ -16,6 +16,7 @@ import google.generativeai as genai
 import easyocr
 from dotenv import load_dotenv
 from datetime import datetime
+from app.core.c4_confidence import C4ConfidenceAnalyzer
 
 load_dotenv()
 class HARPEngine:
@@ -70,6 +71,9 @@ class HARPEngine:
         print("Loading EasyOCR Fallback...")
         self.reader = easyocr.Reader(['en'], gpu=torch.cuda.is_available())
 
+        # --- [C4+] CONFIDENCE ANALYZER (Research Extension) ---
+        self.c4_confidence = C4ConfidenceAnalyzer()
+
     def _load_yolo(self, path, name):
         try:
             print(f"Loading {name}: {path}...")
@@ -91,18 +95,56 @@ class HARPEngine:
         return angle + 360 if angle < 0 else angle
 
     # --- CLOCK PHYSICS SOLVER (Restored from main branch) ---
-    def _solve_physics(self, a1, a2):
-        err_a = np.abs(a1 - self.theory_h) + np.abs(a2 - self.theory_m)
-        err_a = np.minimum(err_a, 720 - err_a)
-        err_b = np.abs(a2 - self.theory_h) + np.abs(a1 - self.theory_m)
-        err_b = np.minimum(err_b, 720 - err_b)
-
-        if np.min(err_a) < np.min(err_b):
-            idx = np.argmin(err_a)
-            return int(idx // 60) if int(idx // 60) != 0 else 12, int(idx % 60), np.min(err_a)
-        else:
-            idx = np.argmin(err_b)
-            return int(idx // 60) if int(idx // 60) != 0 else 12, int(idx % 60), np.min(err_b)
+    def _solve_physics(self, a1, a2, length1=None, length2=None, top_n=3, sigma=15.0):
+        telemetry_log = "[C4 Physics Initialized]"
+        
+        # Correct individual hand difference logic
+        diff_h1_a = np.abs(a1 - self.theory_h)
+        diff_m1_a = np.abs(a2 - self.theory_m)
+        err_a = np.minimum(diff_h1_a, 360 - diff_h1_a) + np.minimum(diff_m1_a, 360 - diff_m1_a)
+        
+        diff_h1_b = np.abs(a2 - self.theory_h)
+        diff_m1_b = np.abs(a1 - self.theory_m)
+        err_b = np.minimum(diff_h1_b, 360 - diff_h1_b) + np.minimum(diff_m1_b, 360 - diff_m1_b)
+        
+        # --- UPSTREAM HEURISTIC DATA FUSION: HAND MORPHOLOGY WEIGHTING ---
+        if length1 is not None and length2 is not None and length1 > 0 and length2 > 0:
+            ratio = length1 / length2
+            penalty = 30.0 
+            if ratio < 0.9: 
+                err_b += penalty 
+                telemetry_log += f" | Hand 1 ({length1:.1f}px) < Hand 2 ({length2:.1f}px) -> Rewarded Hypothesis A (Ang1=Hour), Applied {penalty}deg penalty to B."
+            elif ratio > 1.1:
+                err_a += penalty 
+                telemetry_log += f" | Hand 1 ({length1:.1f}px) > Hand 2 ({length2:.1f}px) -> Rewarded Hypothesis B (Ang2=Hour), Applied {penalty}deg penalty to A."
+        
+        candidates = []
+        for i in range(720):
+            h = int(i // 60)
+            if h == 0: h = 12
+            m = int(i % 60)
+            
+            conf_a = np.exp(-0.5 * (err_a[i] / sigma)**2) * 100
+            conf_b = np.exp(-0.5 * (err_b[i] / sigma)**2) * 100
+            
+            candidates.append({'error': err_a[i], 'confidence': conf_a, 'hour': h, 'minute': m, 'hypothesis': 'A'})
+            candidates.append({'error': err_b[i], 'confidence': conf_b, 'hour': h, 'minute': m, 'hypothesis': 'B'})
+            
+        candidates.sort(key=lambda x: x['error'])
+        
+        top_candidates = []
+        seen_times = set()
+        for cand in candidates:
+            time_key = f"{cand['hour']}:{cand['minute']}"
+            if time_key not in seen_times:
+                top_candidates.append(cand)
+                seen_times.add(time_key)
+            if len(top_candidates) >= top_n:
+                break
+                
+        best = top_candidates[0]
+        telemetry_log += f" | Search Complete. Minimum Error {best['error']:.2f}deg -> Winning Hypothesis: {best['hypothesis']} ({best['confidence']:.1f}% Confidence)."
+        return best['hour'], best['minute'], best['error'], best['confidence'], top_candidates, telemetry_log
 
     def _get_crop(self, img, center, angle):
         h, w = img.shape[:2]
@@ -545,6 +587,9 @@ class HARPEngine:
             a1 = self._get_angle(center, tip1)
             a2 = self._get_angle(center, tip2)
             
+            len1 = math.hypot(center[0]-tip1[0], center[1]-tip1[1])
+            len2 = math.hypot(center[0]-tip2[0], center[1]-tip2[1])
+            
             visualizations['c2_skeleton'] = self._draw_skeleton(target_crop, center, tip1, tip2)
             visualizations['c3_angles'] = self._draw_angles_on_img(target_crop, center, tip1, tip2, a1, a2)
             
@@ -567,21 +612,37 @@ class HARPEngine:
                 c2_research_data = None
                 debug_info.append(f"C2 Research Error: {e}")
             
-            h, m, error = self._solve_physics(a1, a2)
+            h, m, error, conf, cands, telemetry_log = self._solve_physics(a1, a2, length1=len1, length2=len2)
             
             ampm_status, ampm_conf = self._infer_ampm(img_array)
             ambiguity_warning = self._resolve_ambiguity(a1, a2, h, m)
             drift_str = self._calculate_drift(h, m, device_time_str)
             
+            # [C4+] Physics Confidence Assessment (Research Extension)
+            c4_conf_result = self.c4_confidence.analyze(a1, a2, error, h, m)
+            debug_info.append(f"C4 Confidence: {c4_conf_result.reason}")
+            
             debug_info.append(f"AM/PM: {ampm_status} (Conf: {ampm_conf:.2f})")
+            debug_info.append(f"C4 Telemetry Trace: {telemetry_log}")
+            
+            if len1 > 0 and len2 > 0:
+                ratio = len1 / len2
+                if ratio < 0.9:
+                    debug_info.append(f"Heuristics: Hand 1 (Px: {len1:.1f}) shorter than Hand 2 (Px: {len2:.1f}). Rewarded Hypothesis A.")
+                elif ratio > 1.1:
+                    debug_info.append(f"Heuristics: Hand 1 (Px: {len1:.1f}) longer than Hand 2 (Px: {len2:.1f}). Rewarded Hypothesis B.")
+            
+            cand_strings = [f"{c['hour']}:{c['minute']:02d} ({c['confidence']:.1f}%)" for c in cands]
+            debug_info.append(f"Top 3 Candidates: {', '.join(cand_strings)}")
+            
             if ambiguity_warning: debug_info.append(ambiguity_warning)
             debug_info.append(f"Accuracy: {drift_str}")
             
-            if error < 20.0 and not force_expert:
+            if error < 40.0 and not force_expert:
                 return {
                     "time": f"{h}:{m:02d}",
                     "method": "Fast Path (C1+C2+C4)",
-                    "confidence": "High",
+                    "confidence": f"{conf:.1f}%",
                     "heatmap": None,
                     "debug": debug_info,
                     "visualizations": visualizations,
@@ -597,7 +658,9 @@ class HARPEngine:
                     "c1_gauge_conf": float(g_conf) if g_conf != -1.0 else 0.0,
                     "c1_clock_quality": c_quality,
                     "c1_gauge_quality": g_quality,
-                    "c2_research": c2_research_data
+                    "c2_research": c2_research_data,
+                    "ambiguity_candidates": cands,
+                    "c4_confidence": c4_conf_result.to_dict()
                 }
             
             # --- [C3] CLOCK EXPERT PATH ---
@@ -653,17 +716,26 @@ class HARPEngine:
                 visualizations['c3_crops'] = c3_crops
                 visualizations['c3_angles'] = self._draw_angles_on_img(target_crop, center, tip1, tip2, refined_angles[0], refined_angles[1])
                 
-                h_new, m_new, err_new = self._solve_physics(refined_angles[0], refined_angles[1])
+                h_new, m_new, err_new, conf_new, cands_new, telemetry_log_new = self._solve_physics(refined_angles[0], refined_angles[1], length1=len1, length2=len2)
                 
                 ambiguity_warning_expert = self._resolve_ambiguity(refined_angles[0], refined_angles[1], h_new, m_new)
+                
+                debug_info.append(f"C4 Telemetry Trace: {telemetry_log_new}")
+                cand_strings_new = [f"{c['hour']}:{c['minute']:02d} ({c['confidence']:.1f}%)" for c in cands_new]
+                debug_info.append(f"Expert Top 3 Candidates: {', '.join(cand_strings_new)}")
+                
                 if ambiguity_warning_expert and not ambiguity_warning:
                     debug_info.append(ambiguity_warning_expert)
                 drift_str_expert = self._calculate_drift(h_new, m_new, device_time_str)
+
+                # [C4+] Physics Confidence Assessment (Expert Path)
+                c4_conf_result_new = self.c4_confidence.analyze(refined_angles[0], refined_angles[1], err_new, h_new, m_new)
+                debug_info.append(f"C4 Confidence (Expert): {c4_conf_result_new.reason}")
                 
                 return {
                     "time": f"{h_new}:{m_new:02d}",
                     "method": "Expert Path (C1+C2+C3+C4)",
-                    "confidence": "Refined",
+                    "confidence": f"{conf_new:.1f}%",
                     "heatmap": heatmap_img,
                     "debug": debug_info,
                     "visualizations": visualizations,
@@ -679,7 +751,9 @@ class HARPEngine:
                     "c1_gauge_conf": float(g_conf) if g_conf != -1.0 else 0.0,
                     "c1_clock_quality": c_quality,
                     "c1_gauge_quality": g_quality,
-                    "c2_research": c2_research_data
+                    "c2_research": c2_research_data,
+                    "ambiguity_candidates": cands_new,
+                    "c4_confidence": c4_conf_result_new.to_dict()
                 }
 
 # Alias mapping so you don't break existing `main.py` imports 
