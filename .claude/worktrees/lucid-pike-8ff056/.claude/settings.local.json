@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash([ -d \"data/$folder\" ])",
+      "Bash(rm -rf data/__TRACKED_VAR__)",
+      "Bash(rm -f \"data/c3_hand_crops.zip\")",
+      "Bash([ -d \"models/$folder\" ])",
+      "Bash(rm -rf models/__TRACKED_VAR__)",
+      "Bash(awk '{print $NF}')",
+      "Bash(cd \"D:\\\\Y4S1\\\\Research 4\\\\Clock_Time_Research\\\\Research-Project\" echo \"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\" echo \"CLEANED PROJECT DIRECTORY STRUCTURE\" echo \"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\" echo \"\" tree -L 2 -I '__pycache__|*.pyc|.venv|.git|node_modules')"
+    ]
+  }
+}

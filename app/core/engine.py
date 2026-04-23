@@ -120,15 +120,25 @@ class HARPEngine:
             return None
 
     def _get_c3_arch(self):
-        """ResNet-18 with Dropout before the regression head for MC Dropout uncertainty."""
+        """
+        ResNet-18 with Dropout + 2-output (sin θ, cos θ) head for MC-Dropout
+        uncertainty estimation.
+
+        Using (sin, cos) instead of a single scalar avoids the 0°/360°
+        discontinuity that breaks MSE-based regression near the wrap-around
+        boundary.  At inference: residual = atan2(sin_pred, cos_pred).
+
+        Wrapped in nn.Sequential so model[0] gives the backbone directly
+        to the XAI hooks (GradCAM++, IG, LIME, SHAP).
+
+        Must match get_c3_model() in scripts/train_c3.py exactly.
+        """
         backbone = models.resnet18(weights=None)
-        num_ftrs = backbone.fc.in_features
         backbone.fc = nn.Sequential(
             nn.Dropout(p=0.3),
-            nn.Linear(num_ftrs, 1)
+            nn.Linear(backbone.fc.in_features, 2)   # (sin θ, cos θ)
         )
-        model = nn.Sequential(backbone, nn.Sigmoid())
-        return model
+        return nn.Sequential(backbone)   # model[0] = backbone for XAI hooks
 
     # ─────────────────────────────────────────────────────────────────────────────
     def _apply_temperature_scaling(self, sigma: float) -> float:
@@ -226,20 +236,24 @@ class HARPEngine:
         preds_deg = []
         with torch.no_grad():
             for _ in range(n_passes):
-                raw = self.c3_model(tensor).item()  # Sigmoid output in [0, 1]
-                preds_deg.append(raw * 360.0)
+                raw = self.c3_model(tensor)[0]       # shape [2]: (sin θ, cos θ)
+                sin_p = raw[0].item()
+                cos_p = raw[1].item()
+                angle_deg = math.degrees(math.atan2(sin_p, cos_p)) % 360.0
+                preds_deg.append(angle_deg)
 
         # Restore full eval mode (no stochasticity)
         self.c3_model.eval()
 
-        # Circular statistics — essential for angles because 1° and 359° are adjacent
-        # Convert to radians on the full circle [0, 2π]
-        import scipy.stats
+        # Circular statistics — pure numpy, no scipy dependency.
+        # Essential for angles because 1° and 359° are only 2° apart.
         preds_rad = np.radians(preds_deg)
-        mean_rad  = scipy.stats.circmean(preds_rad, high=2 * np.pi, low=0)
-        std_rad   = scipy.stats.circstd(preds_rad,  high=2 * np.pi, low=0)
-        mean_deg  = float(np.degrees(mean_rad) % 360.0)
-        std_deg   = float(np.degrees(std_rad))
+        mean_sin  = float(np.mean(np.sin(preds_rad)))
+        mean_cos  = float(np.mean(np.cos(preds_rad)))
+        mean_deg  = float(np.degrees(np.arctan2(mean_sin, mean_cos)) % 360.0)
+        # Mardia & Jupp circular std: σ = sqrt(-2 ln R),  R = resultant length ∈ [0,1]
+        R         = math.sqrt(mean_sin ** 2 + mean_cos ** 2)
+        std_deg   = float(np.degrees(math.sqrt(max(0.0, -2.0 * math.log(R + 1e-9)))))
 
         # Cache per-call uncertainties for surface in result payload
         if not hasattr(self, '_last_uncertainties'):
@@ -305,15 +319,44 @@ class HARPEngine:
         telemetry_log += f" | Search Complete. Minimum Error {best['error']:.2f}deg -> Winning Hypothesis: {best['hypothesis']} ({best['confidence']:.1f}% Confidence)."
         return best['hour'], best['minute'], best['error'], best['confidence'], top_candidates, telemetry_log
 
-    def _get_crop(self, img, center, angle):
+    def _get_crop(self, img, center, angle, box_size=128):
+        """
+        Rotate image CCW by angle so the hand is approximately vertical, then
+        crop box_size×box_size around the clock centre.
+
+        FIX: the original version returned an empty array whenever the crop
+        window touched an image boundary, silently skipping C3 for hands near
+        the edge.  This version pads symmetrically instead, matching the
+        behaviour of rotate_and_crop() in generate_c3_dataset.py.
+
+        Padding is tracked per-side so the crop origin is only shifted by
+        the padding actually added on that side (the old merged pad_w/pad_h
+        approach would shift the crop incorrectly when only one side overflowed).
+        """
         h, w = img.shape[:2]
-        M = cv2.getRotationMatrix2D((center[0], center[1]), angle, 1.0)
-        rotated = cv2.warpAffine(img, M, (w, h), borderValue=(255,255,255))
-        s = 128 // 2
-        y1, y2 = int(center[1]-s), int(center[1]+s)
-        x1, x2 = int(center[0]-s), int(center[0]+s)
-        if x1 < 0 or y1 < 0 or x2 > w or y2 > h: return np.array([])
-        return rotated[y1:y2, x1:x2]
+        cx, cy = float(center[0]), float(center[1])
+
+        M = cv2.getRotationMatrix2D((cx, cy), angle, 1.0)
+        rotated = cv2.warpAffine(img, M, (w, h), borderValue=(255, 255, 255))
+
+        half = box_size // 2
+        x1 = int(cx - half)
+        y1 = int(cy - half)
+
+        pad_left   = max(0, -x1)
+        pad_top    = max(0, -y1)
+        pad_right  = max(0, (x1 + box_size) - w)
+        pad_bottom = max(0, (y1 + box_size) - h)
+
+        if pad_left or pad_top or pad_right or pad_bottom:
+            rotated = cv2.copyMakeBorder(
+                rotated, pad_top, pad_bottom, pad_left, pad_right,
+                cv2.BORDER_CONSTANT, value=(255, 255, 255)
+            )
+            x1 += pad_left
+            y1 += pad_top
+
+        return rotated[y1 : y1 + box_size, x1 : x1 + box_size]
 
     def _resize_small(self, img):
         """Helper to force 500x500px output for dashboard efficiency"""
@@ -758,7 +801,7 @@ class HARPEngine:
                 if err_str:
                     debug_info.append(f"Stage 2 (Gemini API) Failed: {err_str}")
                 elif min_val is not None and max_val is not None:
-                    scale_stage = "gemini"
+                    scale_stage = "Completed"
                     debug_info.append(f"Stage 2 (Gemini API): Min={min_val}, Max={max_val}")
             
             # --- STAGE 3: LOCAL FALLBACK (INWARD SHIFT OCR) ---

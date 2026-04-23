@@ -655,8 +655,11 @@ class ROARFidelityScorer:
 
             model.eval()
             with torch.no_grad():
-                masked_raw = model(t_masked).item()   # Sigmoid in [0, 1]
-            masked_angle = masked_raw * 360.0
+                raw_out = model(t_masked)[0]   # shape [2]: (sin θ, cos θ)
+            import math as _math
+            masked_angle = _math.degrees(
+                _math.atan2(raw_out[0].item(), raw_out[1].item())
+            ) % 360.0
 
             # Circular difference (wrap to ±180)
             delta = abs(original_angle_deg - masked_angle)
