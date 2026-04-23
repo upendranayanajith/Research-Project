@@ -7,7 +7,9 @@
       "Bash([ -d \"models/$folder\" ])",
       "Bash(rm -rf models/__TRACKED_VAR__)",
       "Bash(awk '{print $NF}')",
-      "Bash(cd \"D:\\\\Y4S1\\\\Research 4\\\\Clock_Time_Research\\\\Research-Project\" echo \"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\" echo \"CLEANED PROJECT DIRECTORY STRUCTURE\" echo \"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\" echo \"\" tree -L 2 -I '__pycache__|*.pyc|.venv|.git|node_modules')"
+      "Bash(cd \"D:\\\\Y4S1\\\\Research 4\\\\Clock_Time_Research\\\\Research-Project\" echo \"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\" echo \"CLEANED PROJECT DIRECTORY STRUCTURE\" echo \"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\" echo \"\" tree -L 2 -I '__pycache__|*.pyc|.venv|.git|node_modules')",
+      "Bash(.venv/Scripts/python.exe -c \"import torch; sd = torch.load\\('models/c3_angle_regression/best.pth', map_location='cpu'\\); print\\('C3 keys:', list\\(sd.keys\\(\\)\\)[-5:]\\); import re; fc_keys = [k for k in sd.keys\\(\\) if 'fc' in k]; print\\('FC layer keys:', fc_keys\\)\")",
+      "Bash(python.exe -c ' *)"
     ]
   }
 }
