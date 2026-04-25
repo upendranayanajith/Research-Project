@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python app/main.py)",
+      "Bash(echo \"FastAPI PID: $!\")",
+      "Bash(.venv/Scripts/python.exe -c ' *)",
+      "Bash(.venv/Scripts/python.exe app/main.py)",
+      "Bash(echo \"FastAPI BG PID: $!\")",
+      "Bash(echo \"PID: $!\")",
+      "Bash(.venv/Scripts/python.exe -m uvicorn app.main:app --host 0.0.0.0 --port 8000)",
+      "Bash(echo \"Uvicorn BG PID: $!\")",
+      "Bash(.venv/Scripts/streamlit.exe run *)",
+      "Bash(echo \"Streamlit BG PID: $!\")",
+      "Bash(find data/ -name \"*.csv\")",
+      "Bash(find data/ -name \"labels*\")",
+      "Bash(netstat -ano)",
+      "Bash(taskkill //F //PID 12452)",
+      "Bash(.venv/Scripts/python.exe -c \"import google_crc32c; print\\(google_crc32c.__version__\\)\")",
+      "Bash(.venv/Scripts/pip.exe index *)",
+      "Bash(.venv/Scripts/pip.exe show *)"
+    ]
+  }
+}

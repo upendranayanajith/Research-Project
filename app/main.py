@@ -1,3 +1,7 @@
+import sys, pathlib, warnings
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+warnings.filterwarnings("ignore", category=RuntimeWarning, module="google_crc32c")
+
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware

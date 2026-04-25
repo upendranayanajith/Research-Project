@@ -5,6 +5,7 @@ import re
 import math
 import torch
 import torch.nn as nn
+from concurrent.futures import ThreadPoolExecutor
 from torchvision import transforms, models
 from ultralytics import YOLO
 from PIL import Image
@@ -72,7 +73,7 @@ class HARPEngine:
 
             # ── XAI Stack (all 7 layers + IG + ROAR) ──────────────────────────
             self.xai             = XaiVisualizer(self.c3_model[0])        # L1  GradCAM++
-            self.ig_explainer    = IntegratedGradientsExplainer(n_steps=50) # L1.5 IG
+            self.ig_explainer    = IntegratedGradientsExplainer(n_steps=20) # L1.5 IG
             self.roar_scorer     = ROARFidelityScorer(mask_fraction=0.20)   # ROAR AFS
             self.local_explainer = LocalExplainer()                         # L2  heuristic
             self.explainer       = SemanticExplainer()                      # L3  Gemini VLM
@@ -85,7 +86,7 @@ class HARPEngine:
             self._uncertainty_temperature: float = 1.0            # temp scaling T
             print("✅ XAI Stack loaded:")
             print(f"   L1  GradCAM++ (multi-layer): {'✅' if self.xai.available else '⚠️ unavailable'}")
-            print("   L1.5 Integrated Gradients (50 steps): ✅")
+            print("   L1.5 Integrated Gradients (20 steps): ✅")
             print("   ROAR Fidelity Scorer (top-20%): ✅")
             print(f"   L3  Gemini VLM: {'✅' if self.explainer.available else '⚠️ no API key'}")
             print(f"   L4  Entropy router: threshold={AdaptiveSemanticRouter.ENTROPY_THRESHOLD}")
@@ -110,6 +111,16 @@ class HARPEngine:
 
         # --- [C4+] CONFIDENCE ANALYZER (Research Extension) ---
         self.c4_confidence = C4ConfidenceAnalyzer()
+
+        # --- Cached Gemini model (avoids re-instantiation on every API call) ---
+        self._gemini_model = None
+        _api_key = os.getenv("GEMINI_API_KEY")
+        if _api_key:
+            try:
+                genai.configure(api_key=_api_key)
+                self._gemini_model = genai.GenerativeModel('gemini-2.5-flash')
+            except Exception:
+                pass
 
     def _load_yolo(self, path, name):
         try:
@@ -210,7 +221,7 @@ class HARPEngine:
                 if isinstance(m, nn.Dropout):
                     m.train()
 
-    def _predict_with_uncertainty(self, tensor: torch.Tensor, n_passes: int = 20):
+    def _predict_with_uncertainty(self, tensor: torch.Tensor, n_passes: int = 8):
         """
         Monte Carlo Dropout Uncertainty Estimation.
 
@@ -364,28 +375,20 @@ class HARPEngine:
 
     def _infer_ampm(self, crop):
         if crop is None or crop.size == 0: return "Unknown", 0.0
-        
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
+        if self._gemini_model is None:
             return "Unknown (Missing API Key)", 0.0
-            
         try:
-            genai.configure(api_key=api_key)
             pil_img = Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
-            model = genai.GenerativeModel('gemini-2.5-flash')
-            
             prompt = "Look at this cropped image of a clock. Based on the lighting, shadows, colors, and overall ambiance, guess whether this photo was taken during the day (AM) or night (PM). Return ONLY 'AM' or 'PM'."
-            
-            response = model.generate_content([prompt, pil_img])
+            response = self._gemini_model.generate_content([prompt, pil_img])
             text = response.text.strip().upper()
-            
             if "AM" in text:
                 return "AM", 0.9
             elif "PM" in text:
                 return "PM", 0.9
             else:
                 return "Unknown", 0.5
-        except Exception as e:
+        except Exception:
             return "Unknown", 0.0
 
     def _resolve_ambiguity(self, a1, a2, h, m):
@@ -431,12 +434,8 @@ class HARPEngine:
         giving much tighter focus than the full gauge crop.
         Falls back to full-crop prompt when ROIs are unavailable.
         """
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
+        if self._gemini_model is None:
             return None, None, "Missing GEMINI_API_KEY in .env"
-
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-2.5-flash')
 
         try:
             if min_roi is not None and max_roi is not None:
@@ -462,7 +461,7 @@ class HARPEngine:
                     "Do not include units or any other text. For example: 0, 100 or -10, 50."
                 )
 
-            response = model.generate_content([prompt, pil_img])
+            response = self._gemini_model.generate_content([prompt, pil_img])
             text = response.text.strip()
 
             parts = [p.strip() for p in text.split(',')]
@@ -540,13 +539,10 @@ class HARPEngine:
 
         Returns a plain-language explanation string, or a fallback on error.
         """
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
+        if self._gemini_model is None:
             return "Gemini XAI unavailable (missing GEMINI_API_KEY)."
         try:
-            genai.configure(api_key=api_key)
             pil_img = Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
-            model = genai.GenerativeModel('gemini-2.5-flash')
             scale_info = (
                 f"Scale range: {min_val} to {max_val}"
                 if min_val is not None and max_val is not None
@@ -562,7 +558,7 @@ class HARPEngine:
                 f"pointing and whether this is consistent with the computed reading. "
                 f"Mention any visual uncertainty (glare, shadow, small tick marks) you observe."
             )
-            response = model.generate_content([prompt, pil_img])
+            response = self._gemini_model.generate_content([prompt, pil_img])
             return response.text.strip()
         except Exception as e:
             return f"Gemini XAI error: {e}"
@@ -606,18 +602,26 @@ class HARPEngine:
         return {"blur": blur, "brightness": brightness, "contrast": contrast, "overall": max(0, min(100, overall))}
 
     def _localize_all(self, img):
-        clock_res = self.c1_clock_model(img, verbose=False)[0] if self.c1_clock_model else None
-        gauge_res = self.c1_gauge_model(img, verbose=False)[0] if self.c1_gauge_model else None
-        
+        def _run_clock():
+            return self.c1_clock_model(img, verbose=False)[0] if self.c1_clock_model else None
+        def _run_gauge():
+            return self.c1_gauge_model(img, verbose=False)[0] if self.c1_gauge_model else None
+
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            f_c = ex.submit(_run_clock)
+            f_g = ex.submit(_run_gauge)
+            clock_res = f_c.result()
+            gauge_res = f_g.result()
+
         c_box = clock_res.boxes[0] if clock_res and len(clock_res.boxes) > 0 else None
         g_box = gauge_res.boxes[0] if gauge_res and len(gauge_res.boxes) > 0 else None
-        
+
         c_crop, c_bbox = self._get_crop_from_box(img, c_box)
         g_crop, g_bbox = self._get_crop_from_box(img, g_box)
-        
+
         c_conf = c_box.conf.item() if c_box else -1.0
         g_conf = g_box.conf.item() if g_box else -1.0
-        
+
         return c_crop, c_bbox, c_conf, g_crop, g_bbox, g_conf
 
     def _draw_bbox(self, img, bbox, detected_type):
@@ -727,26 +731,30 @@ class HARPEngine:
         c1_detected_type = 'clock' if c_conf > g_conf else 'gauge'
         debug_info.append(f"C1: Initial guess is {c1_detected_type.capitalize()}")
 
-        # --- [C2] CROSS-VALIDATION (Fixed Isolated Crops) ---
-        c2_clock_conf = 0.0
-        c2_gauge_conf = 0.0
-        clock_kpts, gauge_kpts = None, None
-        
-        if self.c2_clock_model and c_crop is not None:
-            c_res = self.c2_clock_model(c_crop, verbose=False)[0]
-            if c_res.keypoints and len(c_res.keypoints.data) > 0:
-                kpts = c_res.keypoints.data[0].cpu().numpy()
-                if len(kpts) >= 3:
-                    c2_clock_conf = np.mean(kpts[:3, 2])
-                    clock_kpts = kpts
-                    
-        if self.c2_gauge_model and g_crop is not None:
-            g_res = self.c2_gauge_model(g_crop, verbose=False)[0]
-            if g_res.keypoints and len(g_res.keypoints.data) > 0:
-                kpts = g_res.keypoints.data[0].cpu().numpy()
-                if len(kpts) >= 4:
-                    c2_gauge_conf = np.mean(kpts[:4, 2])
-                    gauge_kpts = kpts
+        # --- [C2] CROSS-VALIDATION (Parallel) ---
+        def _run_c2_clock():
+            if self.c2_clock_model and c_crop is not None:
+                res = self.c2_clock_model(c_crop, verbose=False)[0]
+                if res.keypoints and len(res.keypoints.data) > 0:
+                    kpts = res.keypoints.data[0].cpu().numpy()
+                    if len(kpts) >= 3:
+                        return float(np.mean(kpts[:3, 2])), kpts
+            return 0.0, None
+
+        def _run_c2_gauge():
+            if self.c2_gauge_model and g_crop is not None:
+                res = self.c2_gauge_model(g_crop, verbose=False)[0]
+                if res.keypoints and len(res.keypoints.data) > 0:
+                    kpts = res.keypoints.data[0].cpu().numpy()
+                    if len(kpts) >= 4:
+                        return float(np.mean(kpts[:4, 2])), kpts
+            return 0.0, None
+
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            f_ck = ex.submit(_run_c2_clock)
+            f_gk = ex.submit(_run_c2_gauge)
+            c2_clock_conf, clock_kpts = f_ck.result()
+            c2_gauge_conf, gauge_kpts = f_gk.result()
 
         if c2_clock_conf == 0.0 and c2_gauge_conf == 0.0:
              return {"error": "no clock face or gauge in the uploaded image (C2 verification failed)"}
@@ -842,25 +850,25 @@ class HARPEngine:
 
             visualizations['c2_skeleton'] = self._draw_gauge_skeleton(target_crop, center, min_pt, max_pt, tip, parsed_min, parsed_max)
             visualizations['c3_angles'] = self._draw_gauge_angles(target_crop, center, min_pt, max_pt, tip, span, needle)
-            
-            # --- C2 Shadow Filter ---
-            shadow_results = []
-            try:
-                candidates = [kpts[i] for i in range(1, min(4, len(kpts)))]
-                shadow_results = self.c2_shadow_filter.filter_keypoints(target_crop, center, candidates)
-                shadow_viz = self.c2_shadow_filter.render_validation_image(target_crop, center, shadow_results)
-                visualizations['c2_shadow'] = shadow_viz
-                debug_info.append(f"Shadow Filter: {sum(1 for r in shadow_results if r.accepted)}/{len(shadow_results)} accepted")
-            except Exception as e:
-                debug_info.append(f"Shadow Filter Error: {e}")
 
-            # --- C2 Research Analysis ---
-            try:
-                c2_research_data = self.c2_research.analyze(target_crop, kpts, detected_type='gauge',
-                                                            shadow_results=shadow_results)
-            except Exception as e:
-                c2_research_data = None
-                debug_info.append(f"C2 Research Error: {e}")
+            # --- C2 Shadow Filter + Research (expert path only — LVM calls are expensive) ---
+            shadow_results = []
+            c2_research_data = None
+            if force_expert:
+                try:
+                    candidates = [kpts[i] for i in range(1, min(4, len(kpts)))]
+                    shadow_results = self.c2_shadow_filter.filter_keypoints(target_crop, center, candidates)
+                    shadow_viz = self.c2_shadow_filter.render_validation_image(target_crop, center, shadow_results)
+                    visualizations['c2_shadow'] = shadow_viz
+                    debug_info.append(f"Shadow Filter: {sum(1 for r in shadow_results if r.accepted)}/{len(shadow_results)} accepted")
+                except Exception as e:
+                    debug_info.append(f"Shadow Filter Error: {e}")
+
+                try:
+                    c2_research_data = self.c2_research.analyze(target_crop, kpts, detected_type='gauge',
+                                                                shadow_results=shadow_results)
+                except Exception as e:
+                    debug_info.append(f"C2 Research Error: {e}")
 
             # --- [T1] REAL CONFIDENCE SCORE (replaces hardcoded 'High') ---
             gauge_conf_score, gauge_conf_tier = self._compute_gauge_confidence(
@@ -871,7 +879,7 @@ class HARPEngine:
             gauge_confidence = {"score": gauge_conf_score, "tier": gauge_conf_tier}
             debug_info.append(f"Gauge Confidence: {gauge_conf_tier} ({gauge_conf_score:.1f}/100) — stage={scale_stage}, kpt_conf={c2_gauge_conf:.3f}")
 
-            # --- [T1] GAUGE XAI — Gemini Vision explanation (Force Expert Path only) ---
+            # --- [T1] GAUGE XAI — Gemini Vision explanation (force_expert only) ---
             gauge_xai_text = ""
             if force_expert:
                 debug_info.append("Gauge XAI: Requesting Gemini Vision explanation...")
@@ -960,37 +968,15 @@ class HARPEngine:
             
             visualizations['c2_skeleton'] = self._draw_skeleton(target_crop, center, tip1, tip2)
             visualizations['c3_angles'] = self._draw_angles_on_img(target_crop, center, tip1, tip2, a1, a2)
-            
-            # --- C2 Shadow Filter (from cctv-integrated-chethana) ---
-            shadow_results = []
-            try:
-                candidates = [kpts[i] for i in range(1, min(3, len(kpts)))]
-                shadow_results = self.c2_shadow_filter.filter_keypoints(target_crop, center, candidates)
-                shadow_viz = self.c2_shadow_filter.render_validation_image(target_crop, center, shadow_results)
-                visualizations['c2_shadow'] = shadow_viz
-                debug_info.append(f"Shadow Filter: {sum(1 for r in shadow_results if r.accepted)}/{len(shadow_results)} accepted")
-            except Exception as e:
-                debug_info.append(f"Shadow Filter Error: {e}")
-
-            # --- C2 Research Analysis (from cctv-integrated-chethana) ---
-            try:
-                c2_research_data = self.c2_research.analyze(target_crop, kpts, detected_type='clock',
-                                                            shadow_results=shadow_results)
-            except Exception as e:
-                c2_research_data = None
-                debug_info.append(f"C2 Research Error: {e}")
 
             h, m, error, conf, cands, telemetry_log = self._solve_physics(a1, a2, length1=len1, length2=len2)
-            
-            ampm_status, ampm_conf = self._infer_ampm(img_array)
+
             ambiguity_warning = self._resolve_ambiguity(a1, a2, h, m)
             drift_str = self._calculate_drift(h, m, device_time_str)
-            
+
             # [C4+] Physics Confidence Assessment (Research Extension)
             c4_conf_result = self.c4_confidence.analyze(a1, a2, error, h, m)
             debug_info.append(f"C4 Confidence: {c4_conf_result.reason}")
-            
-            debug_info.append(f"AM/PM: {ampm_status} (Conf: {ampm_conf:.2f})")
             debug_info.append(f"C4 Telemetry Trace: {telemetry_log}")
             
             if len1 > 0 and len2 > 0:
@@ -1017,7 +1003,7 @@ class HARPEngine:
                     "angles": {"hand1": a1, "hand2": a2},
                     "reasoning": f"Physics: H={a1:.1f}°, M={a2:.1f}° → Time={h}:{m:02d}",
                     "error": "",
-                    "ampm": ampm_status,
+                    "ampm": None,
                     "drift": drift_str,
                     "ambiguity": ambiguity_warning,
                     "ambiguity_candidates": cands,
@@ -1028,13 +1014,34 @@ class HARPEngine:
                     "c1_gauge_conf": float(g_conf) if g_conf != -1.0 else 0.0,
                     "c1_clock_quality": c_quality,
                     "c1_gauge_quality": g_quality,
-                    "c2_research": c2_research_data
+                    "c2_research": None
                 }
             
             # --- [C3] CLOCK EXPERT PATH ---
             else:
                 if self.c3_model is None:
                     return {"time": f"{h}:{m:02d}", "method": "Fast Path (C3 Missing)", "visualizations": visualizations, "angles": {"hand1": a1, "hand2": a2}}
+
+                # Shadow filter + C2 research + AM/PM (expensive — expert path only)
+                shadow_results = []
+                try:
+                    candidates = [kpts[i] for i in range(1, min(3, len(kpts)))]
+                    shadow_results = self.c2_shadow_filter.filter_keypoints(target_crop, center, candidates)
+                    shadow_viz = self.c2_shadow_filter.render_validation_image(target_crop, center, shadow_results)
+                    visualizations['c2_shadow'] = shadow_viz
+                    debug_info.append(f"Shadow Filter: {sum(1 for r in shadow_results if r.accepted)}/{len(shadow_results)} accepted")
+                except Exception as e:
+                    debug_info.append(f"Shadow Filter Error: {e}")
+
+                c2_research_data = None
+                try:
+                    c2_research_data = self.c2_research.analyze(target_crop, kpts, detected_type='clock',
+                                                                shadow_results=shadow_results)
+                except Exception as e:
+                    debug_info.append(f"C2 Research Error: {e}")
+
+                ampm_status, ampm_conf = self._infer_ampm(img_array)
+                debug_info.append(f"AM/PM: {ampm_status} (Conf: {ampm_conf:.2f})")
 
                 refined_angles = []
                 heatmaps = []
@@ -1073,7 +1080,7 @@ class HARPEngine:
                         if ig_vis is not None:
                             visualizations[f'xai_ig_h{i+1}'] = ig_vis
 
-                    # MC Dropout — 20 stochastic passes → mean + uncertainty
+                    # MC Dropout — 8 stochastic passes → mean + uncertainty
                     c3_angle, uncertainty_std_raw = self._predict_with_uncertainty(t_input)
                     # Temperature-scaled uncertainty (calibrated proxy)
                     uncertainty_std = self._apply_temperature_scaling(uncertainty_std_raw)
