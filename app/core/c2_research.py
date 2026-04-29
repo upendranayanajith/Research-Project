@@ -13,9 +13,9 @@ import os
 import base64
 
 # GAP 3: Gemini Vision for real LVM coherence scoring
+from PIL import Image as PILImage
 try:
-    import google.generativeai as genai
-    from PIL import Image as PILImage
+    from google import genai
     _GEMINI_AVAILABLE = True
 except ImportError:
     _GEMINI_AVAILABLE = False
@@ -50,12 +50,13 @@ Respond ONLY with a JSON object, nothing else:
 
     def __init__(self):
         api_key = os.getenv("GEMINI_API_KEY")
-        self._use_lvm = bool(api_key and _GEMINI_AVAILABLE)
-        if self._use_lvm:
-            genai.configure(api_key=api_key)
-            self._gemini = genai.GenerativeModel("gemini-2.5-flash")
-        else:
-            self._gemini = None
+        self._gemini = None
+        if api_key and _GEMINI_AVAILABLE:
+            try:
+                self._gemini = genai.Client(api_key=api_key)
+            except Exception:
+                pass
+        self._use_lvm = self._gemini is not None
 
     def analyze(self, crop_img, keypoints, detected_type='clock', shadow_results=None):
         """
@@ -240,14 +241,17 @@ Respond ONLY with a JSON object, nothing else:
             orig_pil  = PILImage.fromarray(cv2.cvtColor(original_img,       cv2.COLOR_BGR2RGB))
             recon_pil = PILImage.fromarray(cv2.cvtColor(reconstruction_img, cv2.COLOR_BGR2RGB))
 
-            response = self._gemini.generate_content([
-                self._SCALE_COHERENCE_PROMPT,
-                "\n\nIMAGE 1 — Original instrument at this scale:",
-                orig_pil,
-                "IMAGE 2 — Skeleton reconstruction at this scale:",
-                recon_pil,
-                "Score the semantic coherence. Respond ONLY with JSON.",
-            ])
+            response = self._gemini.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=[
+                    self._SCALE_COHERENCE_PROMPT,
+                    "\n\nIMAGE 1 — Original instrument at this scale:",
+                    orig_pil,
+                    "IMAGE 2 — Skeleton reconstruction at this scale:",
+                    recon_pil,
+                    "Score the semantic coherence. Respond ONLY with JSON.",
+                ]
+            )
 
             raw = response.text.strip()
             if raw.startswith("```"):

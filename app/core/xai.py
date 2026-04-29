@@ -24,7 +24,7 @@ load_dotenv()
 
 # ── Opt-in imports (soft-fail if library not installed) ───────────────────────
 try:
-    import google.generativeai as genai  # type: ignore
+    from google import genai  # type: ignore
     _GENAI_OK = True
 except ImportError:
     _GENAI_OK = False
@@ -232,10 +232,7 @@ class SemanticExplainer:
         api_key = os.environ.get("GEMINI_API_KEY")
         if api_key:
             try:
-                import warnings
-                warnings.filterwarnings("ignore")
-                genai.configure(api_key=api_key)
-                self.model = genai.GenerativeModel("gemini-2.5-flash")
+                self.client = genai.Client(api_key=api_key)
                 self.available = True
             except Exception as e:
                 print(f"⚠️  SemanticExplainer init failed: {e}")
@@ -264,7 +261,9 @@ class SemanticExplainer:
                 f"In exactly one sentence, state whether the model is looking at the correct "
                 f"visual feature (hand tip or body) and whether the prediction looks reliable."
             )
-            response = self.model.generate_content([prompt, crop_img, heatmap_img])
+            response = self.client.models.generate_content(
+                model="gemini-2.5-flash", contents=[prompt, crop_img, heatmap_img]
+            )
             return f"[Gemini] {response.text.strip()}"
         except Exception as e:
             return self.local.explain(raw_heatmap, predicted_angle, hand_type) \

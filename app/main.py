@@ -18,9 +18,14 @@ from app.core.metrics import metrics_tracker
 # --- [C4] API SETUP ---
 app = FastAPI(title="HARP Research - Multi-Model Analysis API")
 
+_ALLOWED_ORIGINS = os.getenv(
+    "ALLOWED_ORIGINS",
+    "http://localhost:8000,http://localhost:8501,http://127.0.0.1:8000,http://127.0.0.1:8501"
+).split(",")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

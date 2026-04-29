@@ -18,7 +18,7 @@ from app.core.xai import (
 from app.core.metrics import calculate_gauge_reading, calculate_gauge_reading_advanced
 from app.core.c2_research import C2ResearchAnalyzer
 from app.core.c2_shadow_filter import SemanticShadowFilter
-import google.generativeai as genai
+from google import genai
 import easyocr
 from dotenv import load_dotenv
 from datetime import datetime
@@ -112,13 +112,12 @@ class HARPEngine:
         # --- [C4+] CONFIDENCE ANALYZER (Research Extension) ---
         self.c4_confidence = C4ConfidenceAnalyzer()
 
-        # --- Cached Gemini model (avoids re-instantiation on every API call) ---
-        self._gemini_model = None
+        # --- Cached Gemini client (avoids re-instantiation on every API call) ---
+        self._gemini_client = None
         _api_key = os.getenv("GEMINI_API_KEY")
         if _api_key:
             try:
-                genai.configure(api_key=_api_key)
-                self._gemini_model = genai.GenerativeModel('gemini-2.5-flash')
+                self._gemini_client = genai.Client(api_key=_api_key)
             except Exception:
                 pass
 
@@ -375,12 +374,14 @@ class HARPEngine:
 
     def _infer_ampm(self, crop):
         if crop is None or crop.size == 0: return "Unknown", 0.0
-        if self._gemini_model is None:
+        if self._gemini_client is None:
             return "Unknown (Missing API Key)", 0.0
         try:
             pil_img = Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
             prompt = "Look at this cropped image of a clock. Based on the lighting, shadows, colors, and overall ambiance, guess whether this photo was taken during the day (AM) or night (PM). Return ONLY 'AM' or 'PM'."
-            response = self._gemini_model.generate_content([prompt, pil_img])
+            response = self._gemini_client.models.generate_content(
+                model="gemini-2.5-flash", contents=[prompt, pil_img]
+            )
             text = response.text.strip().upper()
             if "AM" in text:
                 return "AM", 0.9
@@ -434,7 +435,7 @@ class HARPEngine:
         giving much tighter focus than the full gauge crop.
         Falls back to full-crop prompt when ROIs are unavailable.
         """
-        if self._gemini_model is None:
+        if self._gemini_client is None:
             return None, None, "Missing GEMINI_API_KEY in .env"
 
         try:
@@ -461,7 +462,9 @@ class HARPEngine:
                     "Do not include units or any other text. For example: 0, 100 or -10, 50."
                 )
 
-            response = self._gemini_model.generate_content([prompt, pil_img])
+            response = self._gemini_client.models.generate_content(
+                model="gemini-2.5-flash", contents=[prompt, pil_img]
+            )
             text = response.text.strip()
 
             parts = [p.strip() for p in text.split(',')]
@@ -539,7 +542,7 @@ class HARPEngine:
 
         Returns a plain-language explanation string, or a fallback on error.
         """
-        if self._gemini_model is None:
+        if self._gemini_client is None:
             return "Gemini XAI unavailable (missing GEMINI_API_KEY)."
         try:
             pil_img = Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
@@ -558,7 +561,9 @@ class HARPEngine:
                 f"pointing and whether this is consistent with the computed reading. "
                 f"Mention any visual uncertainty (glare, shadow, small tick marks) you observe."
             )
-            response = self._gemini_model.generate_content([prompt, pil_img])
+            response = self._gemini_client.models.generate_content(
+                model="gemini-2.5-flash", contents=[prompt, pil_img]
+            )
             return response.text.strip()
         except Exception as e:
             return f"Gemini XAI error: {e}"

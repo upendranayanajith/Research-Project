@@ -65,9 +65,16 @@ class SemanticShadowFilter:
         else:
             self.system_prompt = ""
 
-        # Check for Gemini API (used by existing engine)
-        self.api_key = os.getenv("GEMINI_API_KEY")
-        self.use_lvm = bool(self.api_key and self.system_prompt)
+        # Build a cached Gemini client (avoids per-call instantiation)
+        self._gemini_client = None
+        _api_key = os.getenv("GEMINI_API_KEY")
+        if _api_key and self.system_prompt:
+            try:
+                from google import genai as _genai
+                self._gemini_client = _genai.Client(api_key=_api_key)
+            except Exception:
+                pass
+        self.use_lvm = self._gemini_client is not None
 
     # ──────────────────────────────────────────────
     # PUBLIC API
@@ -130,16 +137,10 @@ class SemanticShadowFilter:
 
     def _validate_lvm(self, image, center, tip, face_radius):
         """Use Gemini Vision API as the coherence oracle."""
-        import google.generativeai as genai
         from PIL import Image as PILImage
 
-        genai.configure(api_key=self.api_key)
-        model = genai.GenerativeModel('gemini-2.5-flash')
-
-        # Render hypothesis image
         hypothesis_img = self._render_hypothesis(image, center, tip)
 
-        # Convert to PIL
         orig_pil = PILImage.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
         hypo_pil = PILImage.fromarray(cv2.cvtColor(hypothesis_img, cv2.COLOR_BGR2RGB))
 
@@ -149,8 +150,9 @@ class SemanticShadowFilter:
             "Evaluate this hypothesis. Respond ONLY with valid JSON as specified in your instructions."
         )
 
-        response = model.generate_content(
-            [self.system_prompt, "\n\n", prompt_text, orig_pil, hypo_pil]
+        response = self._gemini_client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[self.system_prompt, "\n\n", prompt_text, orig_pil, hypo_pil]
         )
         raw = response.text.strip()
 
