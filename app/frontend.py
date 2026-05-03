@@ -333,7 +333,16 @@ def display_results(data):
     with tab2:
         st.markdown(f"### {icon('timeline')} C2 — Skeleton Structure Analysis", unsafe_allow_html=True)
         c2r = data.get("c2_research")
-        
+        method = res.get("method", "")
+
+        if c2r is None and "Fast Path" in method:
+            st.warning(
+                "**C2 Research Analysis not run** — the Fast Path was used because the physics "
+                "solver converged with high confidence (error < 40°). "
+                "Re-run with **Force Expert Path** enabled (scroll down in the sidebar) to see "
+                "skeleton structure, scale analysis, manifold, temporal, shadow filter, and impact summary."
+            )
+
         sub1, sub2, sub3, sub4, sub5, sub6, sub7 = st.tabs([
             "✏️ Skeleton", "🔬 Scale Analysis", "🔮 3D Reconstruction",
             "🟢 Manifold", "⏱ Temporal", "👁️ Shadow Filter", "📊 Impact Summary"
@@ -1166,7 +1175,7 @@ def display_results(data):
             # ── CLOCK RESULT TAB (unchanged) ─────────────────────────────────
             st.markdown(f"# {icon('schedule')} {res['time']}", unsafe_allow_html=True)
             st.markdown(f"**Reasoning:** `{res.get('reasoning', 'N/A')}`")
-            if "ampm" in res:
+            if "ampm" in res and res["ampm"]:
                 ampm_icon = "wb_sunny" if "AM" in res["ampm"] else "bedtime"
                 st.markdown(f"**{icon(ampm_icon)} Time of Day:** {res['ampm']}", unsafe_allow_html=True)
             if "drift" in res:
@@ -1176,7 +1185,7 @@ def display_results(data):
             col_l, col_r = st.columns(2)
             with col_l:
                 st.markdown(f"#### {icon('wb_sunny')} AM/PM Inference", unsafe_allow_html=True)
-                if "ampm" in res:
+                if res.get("ampm"):
                     st.info(f"Detected: **{res['ampm']}**")
                 else:
                     st.info("Not available.")
@@ -1202,7 +1211,7 @@ def display_results(data):
                             "Confidence %": round(c['confidence'], 1),
                             "Fit": get_fit(c['error']),
                         } for c in candidates])
-                        st.dataframe(cdf, width="stretch", hide_index=True)
+                        st.dataframe(cdf, use_container_width=True, hide_index=True)
                 else:
                     st.info("No ambiguity detected.")
 
