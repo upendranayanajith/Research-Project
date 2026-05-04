@@ -14,6 +14,7 @@ import time
 import sys
 import os
 import threading
+from concurrent.futures import ThreadPoolExecutor
 
 # --- PATH FIX ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -31,6 +32,7 @@ st.set_page_config(page_title="HARP Vision", layout="wide", page_icon="static/fa
 class CameraStream:
     """Reads frames from a camera in a background thread to prevent GUI lagging."""
     def __init__(self, src=0):
+        self._src = src
         self.stream = cv2.VideoCapture(src)
         self.stream.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         (self.grabbed, self.frame) = self.stream.read()
@@ -46,6 +48,12 @@ class CameraStream:
             if self.stopped:
                 return
             self.grabbed, self.frame = self.stream.read()
+            if not self.grabbed and not self.stopped:
+                # Lost connection — attempt reconnect after a short pause
+                self.stream.release()
+                time.sleep(2)
+                self.stream = cv2.VideoCapture(self._src)
+                self.stream.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
     def read(self):
         return self.frame
@@ -69,11 +77,14 @@ class ClockProcessor(VideoProcessorBase):
         self.frame_count = 0
         self.fps = 0
         self.last_time = time.time()
-        self.force_expert = False 
+        self.force_expert = False
         self.manual_min_val = ""
         self.manual_max_val = ""
         self.last_result = None
-        
+        self._executor = ThreadPoolExecutor(max_workers=1)
+        self._future = None
+        self._last_analysis_time = 0.0
+
         from app.core.engine import HARPEngine  # type: ignore
         self.engine = HARPEngine(parent_dir)
 
@@ -81,25 +92,31 @@ class ClockProcessor(VideoProcessorBase):
         img = frame.to_ndarray(format="bgr24")
         self.frame_count += 1
         now = time.time()
-        
+
         # FPS Calculation
         if now - self.last_time > 1:
             self.fps = self.frame_count
-            self.frame_count = 0
+            self.frame_count = 1  # Start at 1 to avoid 0 % N == 0 spurious trigger
             self.last_time = now
 
-
-        # Process every 5th frame to save CPU
-        if self.frame_count % 5 == 0:
+        # Collect completed inference result — non-blocking
+        if self._future is not None and self._future.done():
             try:
-                self.last_result = self.engine.analyze(
-                    img, 
-                    force_expert=self.force_expert,
-                    manual_min_val=self.manual_min_val,
-                    manual_max_val=self.manual_max_val
-                )
+                self.last_result = self._future.result()
             except Exception as e:
                 print(f"AI Error: {e}")
+            self._future = None
+
+        # Submit new inference only when idle and rate-limited to every 2s
+        if self._future is None and now - self._last_analysis_time >= 2.0:
+            self._future = self._executor.submit(
+                self.engine.analyze,
+                img.copy(),
+                force_expert=self.force_expert,
+                manual_min_val=self.manual_min_val,
+                manual_max_val=self.manual_max_val,
+            )
+            self._last_analysis_time = now
 
         # Draw overlays
         if self.last_result and isinstance(self.last_result, dict):
@@ -1535,8 +1552,12 @@ elif st.session_state.page == "webcam":
             st.session_state.ip_cam_manual_max = manual_max if manual_max.strip() else ""
 
         st.markdown("---")
-        if st.button("Reset Connection"): 
-            st.cache_resource.clear()
+        if st.button("Reset Connection"):
+            if "cam_stream" in st.session_state:
+                st.session_state.cam_stream.stop()
+                del st.session_state.cam_stream
+            if "cam_stream_url" in st.session_state:
+                del st.session_state.cam_stream_url
             st.rerun()
 
     # Execute IP Camera Loop AFTER all UI is rendered
@@ -1553,10 +1574,7 @@ elif st.session_state.page == "webcam":
             st.session_state.cam_stream_url = rtsp_url
             
         stream = st.session_state.cam_stream
-        
-        # Give stream a moment to connect
-        time.sleep(0.5) 
-        
+
         # We check stream.stream.isOpened() to verify OpenCV connected properly at init
         if not stream.stream.isOpened():
             stframe.error("Failed to open RTSP stream. Check the URL and network connection. IP Cameras require authentication in the format rtsp://USER:PASS@IP:PORT/stream.")
@@ -1566,76 +1584,96 @@ elif st.session_state.page == "webcam":
             frame_count = 0
             last_time = time.time()
             last_ui_update_time = time.time()
+            last_analysis_time = 0.0   # time-based inference gate
             fps = 0
-            last_result = None
-            
+
+            # Background inference state — thread writes here, loop reads here
+            _infer_holder: dict = {'result': None, 'running': False}
+
             # Target ~15 FPS for the frontend UI to prevent Streamlit websocket lag
-            UI_UPDATE_INTERVAL = 1.0 / 15.0 
-            
-            # Analyze interval (e.g. 5 means AI runs roughly ~5-6 times a second assuming UI loop runs at 30 FPS)
-            ANALYZE_INTERVAL = 5
-            
+            UI_UPDATE_INTERVAL = 1.0 / 15.0
+            ANALYZE_EVERY_N_SECONDS = 2.0
+
+            def _run_infer(f, h, eng, fe, mn, mx):
+                try:
+                    h['result'] = eng.analyze(f, force_expert=fe, manual_min_val=mn, manual_max_val=mx)
+                except Exception as e:
+                    print(f"AI Error: {e}")
+                finally:
+                    h['running'] = False
+
             while start_ip_cam:  # Use the checkbox state from UI to control the loop
                 # Instantly grab latest frame from background thread (no blocking!)
                 frame = stream.read()
-                
+
                 if frame is None:
-                    # Thread might be reconnecting or stopped
                     time.sleep(0.1)
                     continue
-                    
+
                 frame_count += 1
                 now = time.time()
-                
+
                 # FPS Calculation
                 if now - last_time > 1:
                     fps = frame_count
-                    frame_count = 0
+                    frame_count = 1  # Start at 1 to avoid 0 % N == 0 spurious trigger
                     last_time = now
-                    
-                # 1. AI Inference
-                if frame_count % ANALYZE_INTERVAL == 0:
-                    try:
-                        # Optional: resize frame before inference to save CPU if it's huge (e.g. 4k)
-                        # small_frame = cv2.resize(frame, (640, 480)) 
-                        # We must copy the frame because Streamlit/AI shouldn't modify the thread's raw array directly
-                        frame_for_ai = frame.copy() 
-                        last_result = st.session_state.ip_cam_engine.analyze(
-                            frame_for_ai, 
-                            force_expert=st.session_state.ip_cam_expert,
-                            manual_min_val=st.session_state.ip_cam_manual_min,
-                            manual_max_val=st.session_state.ip_cam_manual_max
-                        )
-                    except Exception as e:
-                        print(f"AI Error: {e}")
-                        
-                # 2. Draw Overlays (We draw instantly on the copied frame before rendering)
+
+                # 1. AI Inference — submit to background thread, never block the display loop
+                if not _infer_holder['running'] and now - last_analysis_time >= ANALYZE_EVERY_N_SECONDS:
+                    _infer_holder['running'] = True
+                    last_analysis_time = now
+                    threading.Thread(
+                        target=_run_infer,
+                        args=(
+                            frame.copy(),
+                            _infer_holder,
+                            st.session_state.ip_cam_engine,
+                            st.session_state.ip_cam_expert,
+                            st.session_state.ip_cam_manual_min,
+                            st.session_state.ip_cam_manual_max,
+                        ),
+                        daemon=True,
+                    ).start()
+
+                # 2. Draw Overlays on a copy of the frame
                 display_frame = frame.copy()
+                last_result = _infer_holder['result']
                 if last_result and isinstance(last_result, dict):
                     res: dict = last_result  # type: ignore[assignment]
                     display_val = res.get('time', '--')
                     cv2.putText(display_frame, f"READING: {display_val}", (50, 100), cv2.FONT_HERSHEY_DUPLEX, 1.2, (0, 255, 0), 3)
-                    
+
                     method = res.get('method', 'Unknown')
                     color = (0, 255, 0) if "Fast" in method or "Gauge" in method else (0, 0, 255)
                     cv2.putText(display_frame, f"Mode: {method}", (50, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
-                    
+
                     angles = res.get("angles") or {}
-                    if angles.get("hand1", 0) != 0.0:
-                        a1 = angles.get("hand1", 0)
-                        a2 = angles.get("hand2", 0)
-                        cv2.putText(display_frame, f"H:{a1:.0f} M:{a2:.0f}", (50, 190), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+                    if "Gauge" in res.get("method", ""):
+                        span   = angles.get("span",   0)
+                        needle = angles.get("needle", 0)
+                        scale  = res.get("scale", {})
+                        s_min  = scale.get("min", "?")
+                        s_max  = scale.get("max", "?")
+                        cv2.putText(display_frame, f"Span:{span:.0f} Ndl:{needle:.0f}", (50, 190),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 230, 200), 2)
+                        cv2.putText(display_frame, f"Scale:[{s_min},{s_max}]", (50, 225),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (180, 180, 255), 2)
+                    else:
+                        if angles.get("hand1", 0) != 0.0:
+                            a1 = angles.get("hand1", 0)
+                            a2 = angles.get("hand2", 0)
+                            cv2.putText(display_frame, f"H:{a1:.0f} M:{a2:.0f}", (50, 190),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
 
                 cv2.putText(display_frame, f"Pipeline FPS: {fps}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
-                
+
                 # 3. Streamlit UI Update
                 if now - last_ui_update_time >= UI_UPDATE_INTERVAL:
-                    # Convert BGR to RGB for Streamlit
                     frame_rgb = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
-                    stframe.image(frame_rgb, channels="RGB", width="stretch")
+                    stframe.image(frame_rgb, channels="RGB", use_container_width=True)
                     last_ui_update_time = now
-                    
-                # Sleep briefly to free CPU for the background reading thread if needed
+
                 time.sleep(0.01)
 
 # --- PAGE 3: BATCH ---
