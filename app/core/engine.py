@@ -1030,8 +1030,6 @@ class HARPEngine:
                 # ── PHASE 1: Parallel I/O — shadow filter + C2 research + AM/PM ─────
                 # All three touch Gemini (shadow: 2 calls, c2r: 1 call) or local models.
                 # Running them concurrently cuts Phase 1 from ~4.5 s → ~1.5 s.
-                from concurrent.futures import ThreadPoolExecutor
-
                 _sf_candidates = [kpts[i] for i in range(1, min(3, len(kpts)))]
 
                 def _shadow_work():
