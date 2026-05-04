@@ -164,7 +164,7 @@ class SemanticShadowFilter:
         )
 
         response = self._gemini_client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-2.0-flash",
             contents=[self.system_prompt, "\n\n", prompt_text, orig_pil, hypo_pil]
         )
         raw = response.text.strip()

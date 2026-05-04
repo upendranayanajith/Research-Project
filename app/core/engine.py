@@ -380,7 +380,7 @@ class HARPEngine:
             pil_img = Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
             prompt = "Look at this cropped image of a clock. Based on the lighting, shadows, colors, and overall ambiance, guess whether this photo was taken during the day (AM) or night (PM). Return ONLY 'AM' or 'PM'."
             response = self._gemini_client.models.generate_content(
-                model="gemini-2.5-flash", contents=[prompt, pil_img]
+                model="gemini-2.0-flash", contents=[prompt, pil_img]
             )
             text = response.text.strip().upper()
             if "AM" in text:
@@ -1103,23 +1103,32 @@ class HARPEngine:
                         )
                     heatmaps.append(hand_heatmap_vis)
 
-                    # L1.5 — Integrated Gradients (theoretically rigorous regression XAI)
-                    if self.ig_explainer and force_expert:
+                    # MC Dropout first — result gates whether slow XAI methods are worth running
+                    c3_angle, uncertainty_std_raw = self._predict_with_uncertainty(t_input, n_passes=4)
+                    # Temperature-scaled uncertainty (calibrated proxy)
+                    uncertainty_std = self._apply_temperature_scaling(uncertainty_std_raw)
+                    delta = c3_angle - 360 if c3_angle > 180 else c3_angle
+
+                    # Skip IG/LIME/SHAP/ROAR when the model is already confident:
+                    # low uncertainty AND small C3 correction → XAI adds no diagnostic value.
+                    _run_heavy_xai = force_expert and (uncertainty_std >= 8.0 or abs(delta) >= 5.0)
+                    if force_expert and not _run_heavy_xai:
+                        debug_info.append(
+                            f"Hand {i+1}: Heavy XAI skipped "
+                            f"(σ=±{uncertainty_std:.1f}° < 8°, Δ={delta:+.1f}° < 5°)"
+                        )
+
+                    # L1.5 — Integrated Gradients (only when model is uncertain)
+                    if self.ig_explainer and _run_heavy_xai:
                         ig_vis, ig_raw = self.ig_explainer.explain(
                             self.c3_model, t_input, norm_crop
                         )
                         if ig_vis is not None:
                             visualizations[f'xai_ig_h{i+1}'] = ig_vis
 
-                    # MC Dropout — 4 stochastic passes (halved from 8; negligible accuracy loss)
-                    c3_angle, uncertainty_std_raw = self._predict_with_uncertainty(t_input, n_passes=4)
-                    # Temperature-scaled uncertainty (calibrated proxy)
-                    uncertainty_std = self._apply_temperature_scaling(uncertainty_std_raw)
-                    delta = c3_angle - 360 if c3_angle > 180 else c3_angle
-
                     # ROAR — Attribution Fidelity Score (causal heatmap check)
                     afs_result = {"afs": 0.0, "delta_deg": 0.0}
-                    if self.roar_scorer and raw_cam is not None and force_expert:
+                    if self.roar_scorer and raw_cam is not None and _run_heavy_xai:
                         try:
                             afs_result = self.roar_scorer.score(
                                 self.c3_model, t_input, raw_cam, c3_angle
@@ -1156,21 +1165,21 @@ class HARPEngine:
                         f"uncertainty=±{uncertainty_std:.1f}°, entropy={entropy_val:.3f}"
                     )
 
-                    # L6 — LIME superpixel overlay (50 samples — 4× faster than 200)
-                    if self.lime_explainer and self.lime_explainer.available and force_expert:
+                    # L6 — LIME superpixel overlay (10 samples, gated on high uncertainty)
+                    if self.lime_explainer and self.lime_explainer.available and _run_heavy_xai:
                         try:
                             lime_overlay = self.lime_explainer.explain(
-                                self.c3_model, t_input, norm_crop, n_samples=50
+                                self.c3_model, t_input, norm_crop, n_samples=10
                             )
                             if lime_overlay is not None:
                                 visualizations[f'xai_lime_h{i+1}'] = lime_overlay
                         except Exception as _e:
                             debug_info.append(f"LIME H{i+1} error: {_e}")
 
-                    # L7 — SHAP DeepExplainer attribution
-                    if self.shap_explainer and self.shap_explainer.available and force_expert:
+                    # L7 — SHAP DeepExplainer attribution (gated on high uncertainty)
+                    if self.shap_explainer and self.shap_explainer.available and _run_heavy_xai:
                         try:
-                            bg = torch.zeros((5, 3, 64, 64), device=self.device)
+                            bg = torch.zeros((3, 3, 64, 64), device=self.device)
                             shap_overlay = self.shap_explainer.explain(
                                 self.c3_model, t_input, bg
                             )

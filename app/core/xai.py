@@ -262,7 +262,7 @@ class SemanticExplainer:
                 f"visual feature (hand tip or body) and whether the prediction looks reliable."
             )
             response = self.client.models.generate_content(
-                model="gemini-2.5-flash", contents=[prompt, crop_img, heatmap_img]
+                model="gemini-2.0-flash", contents=[prompt, crop_img, heatmap_img]
             )
             return f"[Gemini] {response.text.strip()}"
         except Exception as e:
@@ -282,7 +282,7 @@ class AdaptiveSemanticRouter:
     Entropy threshold: 0.72  (configurable via class attribute)
     """
 
-    ENTROPY_THRESHOLD: float = 0.72
+    ENTROPY_THRESHOLD: float = 0.85
 
     def __init__(self, semantic_explainer: SemanticExplainer):
         self.explainer = semantic_explainer
