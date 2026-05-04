@@ -103,11 +103,24 @@ class SemanticShadowFilter:
             h, w = image.shape[:2]
             face_radius = min(h, w) / 2.0
 
-        results = []
-        for kp in candidates:
-            tip = (float(kp[0]), float(kp[1]))
-            result = self._validate_single(image, center, tip, face_radius, candidates)
-            results.append(result)
+        if not candidates:
+            return []
+
+        if len(candidates) == 1 or not self.use_lvm:
+            return [
+                self._validate_single(image, center, (float(kp[0]), float(kp[1])), face_radius, candidates)
+                for kp in candidates
+            ]
+
+        # Parallel Gemini calls — each candidate is independent I/O
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=len(candidates)) as ex:
+            futures = [
+                ex.submit(self._validate_single, image, center,
+                          (float(kp[0]), float(kp[1])), face_radius, candidates)
+                for kp in candidates
+            ]
+            results = [f.result() for f in futures]
         return results
 
     def get_real_keypoints(self, image, center, candidates, face_radius=None):
