@@ -297,7 +297,32 @@ def display_results(data):
     
     if "error" in res and res["error"]:
         st.markdown(f"#### {icon('error', color='red')} Analysis Failed", unsafe_allow_html=True)
-        st.error(res['error'])
+
+        # Pipeline stage indicator — shows which component caused the failure
+        _stage_labels = ["C1  Detection\n(YOLO)", "C2  Structure\n(Keypoints)", "C3  Regression\n(ResNet)", "C4  Physics\n(Solver)"]
+        _stage_key_map = {"C1": 0, "C2": 1, "C3": 2, "C4": 3}
+        _failed_idx = _stage_key_map.get(res.get("failed_at", ""), -1)
+
+        _pcols = st.columns(4)
+        for _i, (_pcol, _lbl) in enumerate(zip(_pcols, _stage_labels)):
+            if _failed_idx == -1:
+                _pcol.info(_lbl)
+            elif _i < _failed_idx:
+                _pcol.success(f"✓\n{_lbl}")
+            elif _i == _failed_idx:
+                _pcol.error(f"✗\n{_lbl}")
+            else:
+                _pcol.info(f"—\n{_lbl}")
+
+        st.error(res["error"])
+
+        _c1_ck = res.get("c1_clock_conf")
+        _c1_gk = res.get("c1_gauge_conf")
+        if _c1_ck is not None or _c1_gk is not None:
+            st.caption(
+                f"C1 Detection Confidence — "
+                f"Clock model: {(_c1_ck or 0):.1%}  |  Gauge model: {(_c1_gk or 0):.1%}"
+            )
         return
 
     st.markdown(f"#### {icon('check_circle', color='green')} Analysis Complete ({data['processing_time']:.3f}s)", unsafe_allow_html=True)

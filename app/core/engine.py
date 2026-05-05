@@ -722,15 +722,18 @@ class HARPEngine:
             debug_info.append(f"C1: No Object Found - Stopping")
             visualizations['c1_detection'] = self._resize_small(img_array.copy())
             return {
-                "time": "N/A", 
-                "method": f"no clock face or gauge in the uploaded image",
+                "time": "N/A",
+                "method": "Failed — C1 Detection",
                 "confidence": "0.0",
                 "heatmap": None,
                 "debug": debug_info,
                 "visualizations": visualizations,
                 "angles": {"hand1": 0.0, "hand2": 0.0},
-                "reasoning": f"No valid clock or gauge detected.",
-                "error": f"no clock face or gauge in the uploaded image"
+                "reasoning": "C1 YOLO found no clock or gauge candidate in the image.",
+                "error": "No clock face or gauge detected in the image (C1 YOLO found no candidates)",
+                "failed_at": "C1",
+                "c1_clock_conf": 0.0,
+                "c1_gauge_conf": 0.0,
             }
 
         c1_detected_type = 'clock' if c_conf > g_conf else 'gauge'
@@ -762,7 +765,27 @@ class HARPEngine:
             c2_gauge_conf, gauge_kpts = f_gk.result()
 
         if c2_clock_conf == 0.0 and c2_gauge_conf == 0.0:
-             return {"error": "no clock face or gauge in the uploaded image (C2 verification failed)"}
+            debug_info.append(f"C1: Clock conf={c_conf:.3f}, Gauge conf={g_conf:.3f} — weak/false-positive detection")
+            debug_info.append("C2: Keypoint verification failed — no clock or gauge structure found in crop")
+            visualizations['c1_detection'] = self._resize_small(img_array.copy())
+            return {
+                "error": (
+                    f"C1 detected a candidate (clock={c_conf:.2f}, gauge={g_conf:.2f}) "
+                    "but C2 keypoint analysis found no clock or gauge structure. "
+                    "The image likely does not contain an analog clock or gauge."
+                ),
+                "failed_at": "C1",
+                "time": "N/A",
+                "method": "Failed — C1 Detection",
+                "confidence": "0.0",
+                "heatmap": None,
+                "debug": debug_info,
+                "visualizations": visualizations,
+                "angles": {"hand1": 0.0, "hand2": 0.0},
+                "reasoning": "C1 YOLO produced a weak/false-positive detection that C2 structural verification rejected.",
+                "c1_clock_conf": float(c_conf) if c_conf != -1.0 else 0.0,
+                "c1_gauge_conf": float(g_conf) if g_conf != -1.0 else 0.0,
+            }
              
         # The true type is whichever C2 model is more confident about its keypoints
         detected_type = 'clock' if c2_clock_conf > c2_gauge_conf else 'gauge'
