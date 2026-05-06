@@ -84,6 +84,7 @@ class ClockProcessor(VideoProcessorBase):
         self._executor = ThreadPoolExecutor(max_workers=1)
         self._future = None
         self._last_analysis_time = 0.0
+        self._gauge_scale_cache: dict = {"min": None, "max": None}
 
         from app.core.engine import HARPEngine  # type: ignore
         self.engine = HARPEngine(parent_dir)
@@ -99,41 +100,55 @@ class ClockProcessor(VideoProcessorBase):
             self.frame_count = 1  # Start at 1 to avoid 0 % N == 0 spurious trigger
             self.last_time = now
 
+        # Fix B: Blur gate — compute once, reuse for submission gate and overlay
+        _gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        _blur_score = cv2.Laplacian(_gray, cv2.CV_64F).var()
+
         # Collect completed inference result — non-blocking
         if self._future is not None and self._future.done():
             try:
                 self.last_result = self._future.result()
+                # Fix A: Cache gauge scale from successful extraction so later frames skip Gemini/OCR
+                if self.last_result and "Gauge" in self.last_result.get("method", ""):
+                    _s = self.last_result.get("scale", {})
+                    if _s.get("min") not in (None, "Failed") and _s.get("max") not in (None, "Failed"):
+                        self._gauge_scale_cache["min"] = _s["min"]
+                        self._gauge_scale_cache["max"] = _s["max"]
             except Exception as e:
                 print(f"AI Error: {e}")
             self._future = None
 
-        # Submit new inference only when idle and rate-limited to every 2s
-        if self._future is None and now - self._last_analysis_time >= 2.0:
+        # Fix A: Effective scale — use cached values when no manual override is set
+        _eff_min = self.manual_min_val
+        _eff_max = self.manual_max_val
+        if not _eff_min and not _eff_max and self._gauge_scale_cache["min"] is not None:
+            _eff_min = str(self._gauge_scale_cache["min"])
+            _eff_max = str(self._gauge_scale_cache["max"])
+
+        # Submit new inference — idle + rate-limited + Fix B: not blurry
+        if self._future is None and now - self._last_analysis_time >= 2.0 and _blur_score >= 80:
             self._future = self._executor.submit(
                 self.engine.analyze,
                 img.copy(),
                 force_expert=self.force_expert,
-                manual_min_val=self.manual_min_val,
-                manual_max_val=self.manual_max_val,
+                manual_min_val=_eff_min,
+                manual_max_val=_eff_max,
             )
             self._last_analysis_time = now
 
         # Draw overlays
         if self.last_result and isinstance(self.last_result, dict):
             res: dict = self.last_result  # type: ignore[assignment]
-            
-            # Show Time or Gauge %
+
             display_val = res.get('time', '--')
             cv2.putText(img, f"READING: {display_val}", (50, 100), cv2.FONT_HERSHEY_DUPLEX, 1.2, (0, 255, 0), 3)
-            
+
             method = res.get('method', 'Unknown')
             color = (0, 255, 0) if "Fast" in method or "Gauge" in method else (0, 0, 255)
             cv2.putText(img, f"Mode: {method}", (50, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
-            
-            # F5: Gauge-aware angle overlay
+
             angles = res.get("angles") or {}
             if "Gauge" in res.get("method", ""):
-                # Gauge: show span, needle, and scale range
                 span   = angles.get("span",   0)
                 needle = angles.get("needle", 0)
                 scale  = res.get("scale", {})
@@ -143,8 +158,13 @@ class ClockProcessor(VideoProcessorBase):
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 230, 200), 2)
                 cv2.putText(img, f"Scale:[{s_min},{s_max}]", (50, 225),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.55, (180, 180, 255), 2)
+                # Fix C: Scale lock indicator
+                _locked = self._gauge_scale_cache["min"] is not None
+                _lk_txt = (f"Scale LOCKED [{self._gauge_scale_cache['min']},{self._gauge_scale_cache['max']}]"
+                           if _locked else "Scale: Searching...")
+                _lk_col = (0, 230, 100) if _locked else (0, 165, 255)
+                cv2.putText(img, _lk_txt, (50, 258), cv2.FONT_HERSHEY_SIMPLEX, 0.5, _lk_col, 2)
             else:
-                # Clock: show hour/minute hand angles
                 if angles.get("hand1", 0) != 0.0:
                     a1 = angles.get("hand1", 0)
                     a2 = angles.get("hand2", 0)
@@ -152,6 +172,9 @@ class ClockProcessor(VideoProcessorBase):
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
 
         cv2.putText(img, f"FPS: {self.fps}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
+        # Fix B: Blur score on overlay — green when sharp, orange when too blurry to submit
+        _blur_col = (0, 200, 0) if _blur_score >= 80 else (0, 140, 255)
+        cv2.putText(img, f"Blur:{_blur_score:.0f}", (20, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.55, _blur_col, 2)
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
 # ==========================================
@@ -1584,6 +1607,13 @@ elif st.session_state.page == "webcam":
             if "cam_stream_url" in st.session_state:
                 del st.session_state.cam_stream_url
             st.rerun()
+        if cam_source == "Local Webcam":
+            if st.button("Clear Gauge Scale Cache", help="Forces scale re-extraction on next gauge frame"):
+                if expert_controls_ctx and expert_controls_ctx.video_processor:  # type: ignore[union-attr]
+                    expert_controls_ctx.video_processor._gauge_scale_cache = {"min": None, "max": None}  # type: ignore[union-attr]
+                    st.success("Scale cache cleared.")
+        else:
+            st.caption("IP cam: uncheck + recheck stream to reset scale cache.")
 
     # Execute IP Camera Loop AFTER all UI is rendered
     if run_ip_cam_loop:
@@ -1613,15 +1643,42 @@ elif st.session_state.page == "webcam":
             fps = 0
 
             # Background inference state — thread writes here, loop reads here
-            _infer_holder: dict = {'result': None, 'running': False}
+            _infer_holder: dict = {'result': None, 'running': False, 'blur': 0.0, 'skipped': False}
+
+            # Fix A: Gauge scale cache — persists across inference cycles for the stream session
+            _scale_cache: dict = {"min": None, "max": None}
 
             # Target ~15 FPS for the frontend UI to prevent Streamlit websocket lag
             UI_UPDATE_INTERVAL = 1.0 / 15.0
             ANALYZE_EVERY_N_SECONDS = 2.0
 
-            def _run_infer(f, h, eng, fe, mn, mx):
+            def _run_infer(f, h, sc, eng, fe, mn, mx):
+                # Fix B: Blur gate — skip frames too blurry for reliable keypoint detection
+                _gray = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY)
+                _blur = cv2.Laplacian(_gray, cv2.CV_64F).var()
+                h['blur'] = _blur
+                if _blur < 80:
+                    h['skipped'] = True
+                    h['running'] = False
+                    return
+                h['skipped'] = False
+
+                # Fix A: Use cached scale as manual override when no explicit override is set
+                _eff_min = mn
+                _eff_max = mx
+                if not _eff_min and not _eff_max and sc["min"] is not None:
+                    _eff_min = str(sc["min"])
+                    _eff_max = str(sc["max"])
+
                 try:
-                    h['result'] = eng.analyze(f, force_expert=fe, manual_min_val=mn, manual_max_val=mx)
+                    result = eng.analyze(f, force_expert=fe, manual_min_val=_eff_min, manual_max_val=_eff_max)
+                    h['result'] = result
+                    # Fix A: Persist scale from a successful gauge extraction into the cache
+                    if result and "Gauge" in result.get("method", ""):
+                        _s = result.get("scale", {})
+                        if _s.get("min") not in (None, "Failed") and _s.get("max") not in (None, "Failed"):
+                            sc["min"] = _s["min"]
+                            sc["max"] = _s["max"]
                 except Exception as e:
                     print(f"AI Error: {e}")
                 finally:
@@ -1653,6 +1710,7 @@ elif st.session_state.page == "webcam":
                         args=(
                             frame.copy(),
                             _infer_holder,
+                            _scale_cache,
                             st.session_state.ip_cam_engine,
                             st.session_state.ip_cam_expert,
                             st.session_state.ip_cam_manual_min,
@@ -1684,6 +1742,13 @@ elif st.session_state.page == "webcam":
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 230, 200), 2)
                         cv2.putText(display_frame, f"Scale:[{s_min},{s_max}]", (50, 225),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (180, 180, 255), 2)
+                        # Fix C: Scale lock indicator
+                        _locked = _scale_cache["min"] is not None
+                        _lk_txt = (f"Scale LOCKED [{_scale_cache['min']},{_scale_cache['max']}]"
+                                   if _locked else "Scale: Searching...")
+                        _lk_col = (0, 230, 100) if _locked else (0, 165, 255)
+                        cv2.putText(display_frame, _lk_txt, (50, 258),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, _lk_col, 2)
                     else:
                         if angles.get("hand1", 0) != 0.0:
                             a1 = angles.get("hand1", 0)
@@ -1692,6 +1757,11 @@ elif st.session_state.page == "webcam":
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
 
                 cv2.putText(display_frame, f"Pipeline FPS: {fps}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
+                # Fix B: Blur score — green when sharp, orange when frame was skipped as blurry
+                _cur_blur = _infer_holder.get('blur', 0.0)
+                _blur_col = (0, 200, 0) if _cur_blur >= 80 else (0, 140, 255)
+                cv2.putText(display_frame, f"Blur:{_cur_blur:.0f}", (20, 65),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, _blur_col, 2)
 
                 # 3. Streamlit UI Update
                 if now - last_ui_update_time >= UI_UPDATE_INTERVAL:
